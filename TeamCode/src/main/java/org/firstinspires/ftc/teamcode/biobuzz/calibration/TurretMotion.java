@@ -1,6 +1,7 @@
 package org.firstinspires.ftc.teamcode.biobuzz.calibration;
 
 import org.firstinspires.ftc.teamcode.biobuzz.Maths;
+import org.firstinspires.ftc.teamcode.biobuzz.RobotConfig;
 import org.firstinspires.ftc.teamcode.biobuzz.Turret;
 
 final class TurretMotion {
@@ -8,8 +9,8 @@ final class TurretMotion {
 
     static boolean go(CalibrationOp op, Turret turret, double angle, double tolerance)
             throws InterruptedException {
-        for (double maxSpeed : new double[]{1.28, 0.66}) {
-            if (!quiet(op, turret, 1.35)) return false;
+        if (!quiet(op, turret, 1.35)) return false;
+        for (double maxSpeed : new double[]{1.85, 0.66}) {
             if (Math.abs(turret.angle - angle) <= tolerance) return true;
             double[] reference = {turret.angle, 0};
             double duration = 1.6 + Math.abs(angle - turret.angle) / maxSpeed;
@@ -35,7 +36,8 @@ final class TurretMotion {
             } finally {
                 turret.stop();
             }
-            if (quiet(op, turret, 1.35) && Math.abs(turret.angle - angle) <= tolerance) return true;
+            if (!quiet(op, turret, 1.35)) return false;
+            if (Math.abs(turret.angle - angle) <= tolerance) return true;
         }
         return false;
     }
@@ -55,5 +57,27 @@ final class TurretMotion {
             return rest[0] < 0.17;
         });
         return op.opModeIsActive() && !op.motionAborted() && rest[0] >= 0.17;
+    }
+
+    static boolean goDirect(CalibrationOp op, Turret turret, double angle, String label)
+            throws InterruptedException {
+        if (!quiet(op, turret, 1.35)) return false;
+        double[] settled = {0};
+        try {
+            op.runFor(6.5, (time, dt) -> {
+                turret.sample(dt);
+                if (!turret.encoderReady() || !turret.motorResponding()) return false;
+                double error = angle - turret.angle;
+                settled[0] = Math.abs(error) <= RobotConfig.SHOT_AIM_TOLERANCE
+                        && Math.abs(turret.speed) < 0.14 ? settled[0] + dt : 0;
+                turret.control(angle, 0, dt);
+                op.show(label + "预备角", "误差 %+.1f°，云台 %+.0f°/s，功率 %+.2f",
+                        Math.toDegrees(error), Math.toDegrees(turret.speed), turret.output());
+                return turret.motorResponding() && settled[0] < 0.12;
+            });
+            return op.opModeIsActive() && !op.motionAborted() && turret.motorResponding() && settled[0] >= 0.12;
+        } finally {
+            turret.stop();
+        }
     }
 }

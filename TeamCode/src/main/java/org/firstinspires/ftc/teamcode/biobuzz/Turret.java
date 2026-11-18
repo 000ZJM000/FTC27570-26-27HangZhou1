@@ -13,12 +13,13 @@ public final class Turret {
     private TurretPlant plant;
     private double[] coupling;
     private final TurretRange range;
-    private final TurretRewind rewind = new TurretRewind();
+    private final boolean savedPid;
     private final TurretObserver observer = new TurretObserver();
     private Pid pid;
-    private double appliedPower, brakeDuty;
+    private double[] gains;
+    private double appliedPower, brakeDuty, controlTarget;
     private boolean holding;
-    private int homeTick, lastTick, previousGoal;
+    private int homeTick, lastTick, previousGoal, trackedGoal;
     private boolean homed, encoderFresh, fieldTracking, motorResponding = true;
     private double encoderAge, goalRate, previousGoalBearing, lastPower;
     private double previousCoupledRate, coupledAcceleration, filteredStick;
@@ -35,10 +36,13 @@ public final class Turret {
         motor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         geometry = store.read(CalibrationStore.HOME, 0, 0, 0, 0);
         plant = TurretPlant.load(store);
-        friction = new TurretFriction(store);
-        coupling = store.read(CalibrationStore.TURRET_COUPLED_DYNAMICS, 0, 0, 0, 0);
+        friction = new TurretFriction(store, plant);
+        setCoupling(store.read(CalibrationStore.TURRET_COUPLED_DYNAMICS, 0, 0, 0, 0));
         range = new TurretRange(geometry[2]);
-        setPidGains(store.read(CalibrationStore.TURRET_PID, plant.pidSeed(plant.baseline())));
+        double[] stored = store.readExact(CalibrationStore.TURRET_PID, 3);
+        savedPid = stored != null && stored[0] >= 0 && stored[1] >= 0 && stored[2] >= 0
+                && (stored[0] > 0 || stored[1] > 0 || stored[2] > 0);
+        setPidGains(savedPid ? stored : plant.pidSeed(plant.baseline()));
     }
 
     public void installPlant(TurretPlant model) {
@@ -52,13 +56,26 @@ public final class Turret {
         setPidGains(plant.pidSeed(bandwidthScale));
     }
 
-    public void setPidGains(double[] gains) { pid = new Pid(gains); }
+    public void setPidGains(double[] gains) {
+        this.gains = gains.clone();
+        pid = new Pid(this.gains);
+    }
+
+    public double[] pidGains() { return gains.clone(); }
+    public boolean usesSavedPid() { return savedPid; }
+    public boolean plantIdentified() { return plant.identified(); }
+    public boolean hasFrictionMap() { return friction.measured(); }
     public double frictionDuty(double angle, int direction, double speed) {
         return friction.duty(angle, span(), direction, speed);
     }
     public double velocityGain(int direction) { return friction.velocityGain(direction); }
     public double[] coupling() { return coupling.clone(); }
-    public void setCoupling(double[] model) { coupling = model.clone(); }
+    public void setCoupling(double[] model) {
+        coupling = model.clone();
+        for (int i = 0; i < 4; i += 2) {
+            if (!(coupling[i] > 0 && coupling[i + 1] >= 0)) coupling[i] = coupling[i + 1] = 0;
+        }
+    }
     public int rawTicks() {
         return encoder.getController().getMotorCurrentPosition(encoder.getPortNumber());
     }
@@ -132,11 +149,16 @@ public final class Turret {
         }
         fieldTracking = pose.headingUsable();
         if (!fieldTracking) {
-            rewind.reset();
-            if (!Double.isFinite(localHold)) localHold = Maths.clip(angle, 0, span());
+            if (!Double.isFinite(localHold)) {
+                localHold = Maths.clip(angle, 0, span());
+                range.reset();
+                pid.reset();
+                holding = false;
+            }
             previousGoal = 0;
             goalRate = 0;
             previousCoupledRate = coupledAcceleration = filteredStick = 0;
+            target = localHold;
             control(localHold, 0, dt);
             return;
         }
@@ -148,34 +170,28 @@ public final class Turret {
         double stabilized = worldBearing - pose.heading + geometry[3];
         // Stage 2: update the desired bearing from the measured position.
         // At the exact pivot/target coincidence, retain the last defined bearing.
-        double correction = goal == null || goal.distanceMm < 0.1 ? 0 : Maths.wrap(goal.bearing - worldBearing);
+        int goalNumber = goal == null || goal.distanceMm < 0.1 ? 0 : goal.goal;
+        if (goalNumber != 0 && trackedGoal != goalNumber) {
+            trackedGoal = goalNumber;
+            range.reset();
+            pid.reset();
+        }
+        double correction = goalNumber == 0 ? 0 : Maths.wrap(goal.bearing - worldBearing);
         worldBearing = Maths.wrap(worldBearing + correction);
-        updateGoalRate(goal, dt);
+        updateGoalRate(goal, goalNumber, dt);
         double relativeRate = goalRate - pose.yawRate;
         int toward = relativeRate >= 0 ? 1 : -1;
         double lookahead = Maths.clip(0.23 + plant.delay(toward), 0.24, 0.36);
         boolean wasRewinding = range.rewinding;
         target = range.target(stabilized + correction, angle, relativeRate, lookahead);
         worldError = Maths.wrap(worldBearing - actualBearing);
-        if (range.rewinding) {
-            if (!wasRewinding) {
-                pid.reset();
-                holding = false;
-            }
-            previousCoupledRate = coupledAcceleration = filteredStick = 0;
-            double destinationRate = range.rewindTargetMoves() ? relativeRate : 0;
-            rewind.update(angle, speed, target, destinationRate, dt);
-            control(Maths.clip(rewind.angle, RobotConfig.TURRET_MARGIN, span() - RobotConfig.TURRET_MARGIN),
-                    rewind.rate, dt);
-            if (encoderReady() && rewind.arrived(angle, speed, target, destinationRate)) {
-                range.finishRewind();
-                rewind.reset();
-            }
-            return;
+        if (range.rewinding && !wasRewinding) {
+            pid.reset();
+            holding = false;
         }
-        boolean tracking = range.reachable;
-        double desiredRate = tracking ? goalRate - pose.yawRate : 0;
-        double rate = tracking ? -pose.yawRate : 0;
+        boolean tracking = range.rewinding ? range.rewindTargetMoves() : range.reachable;
+        double desiredRate = tracking ? relativeRate : 0;
+        double rate = -pose.yawRate;
         double acceleration = Maths.clip((rate - previousCoupledRate) / dt, -35, 35);
         coupledAcceleration += dt / (0.055 + dt) * (acceleration - coupledAcceleration);
         previousCoupledRate = rate;
@@ -185,10 +201,14 @@ public final class Turret {
         double anticipatedRate = tracking ? 0.55 * (filteredStick - stick) : 0;
         control(target, desiredRate, tracking ? rate : 0, tracking ? coupledAcceleration : 0,
                 anticipatedRate, dt);
+        if (range.rewinding && pose.headingValid && encoderReady() && motorResponding
+                && Math.abs(target - angle) <= RobotConfig.SHOT_AIM_TOLERANCE
+                && Math.abs(speed - desiredRate) < 0.32) {
+            range.finishRewind();
+        }
     }
 
-    private void updateGoalRate(FieldTargets goal, double dt) {
-        int goalNumber = goal == null || goal.distanceMm < 0.1 ? 0 : goal.goal;
+    private void updateGoalRate(FieldTargets goal, int goalNumber, double dt) {
         if (goalNumber != 0 && previousGoal == goalNumber) {
             double rate = Maths.clip(Maths.wrap(goal.bearing - previousGoalBearing) / dt, -5, 5);
             goalRate += dt / (0.06 + dt) * (rate - goalRate);
@@ -203,8 +223,10 @@ public final class Turret {
     }
     public boolean rewinding() { return range.rewinding; }
     public boolean rewindPredicted() { return range.rewinding && range.predicted; }
+    public boolean targetReachable() { return range.reachable; }
     public double output() { return lastPower; }
     public double brakeDuty() { return brakeDuty; }
+    double controlTarget() { return controlTarget; }
 
     public void control(double targetAngle, double targetRate, double dt) {
         control(targetAngle, targetRate, 0, 0, 0, dt);
@@ -212,6 +234,7 @@ public final class Turret {
 
     private void control(double targetAngle, double targetRate, double chassisRate, double chassisAcceleration,
                          double anticipatedRate, double dt) {
+        controlTarget = targetAngle;
         double error = targetAngle - observer.angle;
         boolean quiet = Math.abs(targetRate) < 0.075 && Math.abs(anticipatedRate) < 0.10
                 && Math.abs(chassisAcceleration) < 0.7;
@@ -226,9 +249,10 @@ public final class Turret {
             return;
         }
         double reference = Maths.clip(targetRate, -RobotConfig.TURRET_MAX_RATE, RobotConfig.TURRET_MAX_RATE);
-        double demand = Math.abs(reference) > 0.12 ? reference : error * 3.3;
+        // A moving destination can have the opposite velocity to the travel needed to reach it.
+        double demand = reference + error * 3.3;
         int direction = demand >= 0 ? 1 : -1;
-        double kV = velocityGain(direction);
+        double referenceKv = velocityGain(reference == 0 ? direction : (reference > 0 ? 1 : -1));
         double ks = frictionDuty(angle, direction, speed);
         double frictionScale = Maths.clip(Math.abs(demand) / 0.11, 0, 1);
         double frictionPower = Math.copySign(ks * frictionScale, demand);
@@ -236,19 +260,18 @@ public final class Turret {
         int brakeDirection = rateError >= 0 ? 1 : -1;
         brakeDuty = encoderFresh ? TurretBrake.duty(error, rateError, frictionPower, appliedPower,
                 plant.kV(brakeDirection), plant.timeConstant(brakeDirection), plant.delay(brakeDirection)) : 0;
-        double feedforward = frictionPower + brakeDuty + kV * reference;
-        double disturbanceRate = chassisRate + anticipatedRate;
+        double feedforward = frictionPower + brakeDuty + referenceKv * reference;
+        double disturbanceRate = Math.abs(chassisRate) > 0.10 ? chassisRate : anticipatedRate;
         int side = TurretFriction.side(Math.abs(disturbanceRate) > 0.10
                 ? (disturbanceRate > 0 ? 1 : -1) : direction);
         double fittedKv = coupling[side * 2];
         double fittedKa = coupling[side * 2 + 1];
-        double velocityCorrection = fittedKv > 0
-                ? (fittedKv - velocityGain(side == 0 ? 1 : -1)) * chassisRate : 0;
+        double velocityCorrection = fittedKv > 0 ? (fittedKv - referenceKv) * chassisRate : 0;
         if (fittedKv <= 0) {
             int chassisDirection = side == 0 ? 1 : -1;
             fittedKa = plant.kV(chassisDirection) * plant.timeConstant(chassisDirection);
         }
-        feedforward += Maths.clip(velocityCorrection + (fittedKv > 0 ? fittedKv : kV) * anticipatedRate
+        feedforward += Maths.clip(velocityCorrection + (fittedKv > 0 ? fittedKv : referenceKv) * anticipatedRate
                 + fittedKa * chassisAcceleration, -0.50, 0.50);
         double disturbance = Maths.clip(Math.abs(speed) / 0.45, 0, 1) * observer.bias;
         // Feed the real limits into the only PID so its integrator also respects the duty slew.
@@ -266,13 +289,17 @@ public final class Turret {
         if (motorResponding) appliedPower = lastPower;
     }
 
-    private double powerLimit(int direction) {
+    double powerLimit(int direction) {
         if (!homed || !calibrated() || encoderAge >= 0.10) return 0;
         double remaining = direction > 0 ? span() - angle : angle;
         double horizon = Maths.clip(0.5 * plant.timeConstant(direction) + plant.delay(direction), 0.08, 0.30);
         double stoppingAllowance = Math.max(0, direction * speed) * horizon;
         double usable = remaining - RobotConfig.TURRET_MARGIN - stoppingAllowance;
-        double limit = OUTPUT_LIMIT * Maths.clip(usable / Math.toRadians(12), 0, 1);
+        double taper = OUTPUT_LIMIT * Maths.clip(usable / Math.toRadians(12), 0, 1);
+        // Leave enough duty to break static friction before the target tolerance.
+        // Both envelopes reach zero at the same stopping boundary.
+        double breakaway = Math.min(OUTPUT_LIMIT, frictionDuty(angle, direction, 0) + 0.035);
+        double limit = Math.max(taper, breakaway * Maths.clip(usable / RobotConfig.SHOT_AIM_TOLERANCE, 0, 1));
         return encoderFresh ? limit : Math.min(limit, 0.15);
     }
 
@@ -306,11 +333,10 @@ public final class Turret {
         worldBearing = Double.NaN;
         localHold = Double.NaN;
         fieldTracking = false;
-        previousGoal = 0;
+        previousGoal = trackedGoal = 0;
         goalRate = 0;
         previousCoupledRate = coupledAcceleration = filteredStick = 0;
         range.reset();
-        rewind.reset();
         holding = false;
         pid.reset();
         observer.reset(angle, speed);

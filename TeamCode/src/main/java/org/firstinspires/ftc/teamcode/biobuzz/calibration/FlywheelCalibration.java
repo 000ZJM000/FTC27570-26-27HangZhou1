@@ -12,7 +12,9 @@ import java.util.Locale;
 public final class FlywheelCalibration extends CalibrationOp {
     private static final double PID_HOLD = 0.25;
     private static final double STEP_DURATION = 3.1;
-    private static final double[] POWER_LEVELS = {0.26, 0.40, 0.55, 0.70, 0.85, 0.93, RobotConfig.FLYWHEEL_MAX_POWER};
+    private static final double REFERENCE_POWER = 0.70;
+    private static final double FULL_POWER = RobotConfig.FLYWHEEL_MAX_POWER;
+    private static final double[] POWER_LEVELS = {0.26, 0.40, 0.55, REFERENCE_POWER, 0.85, 0.93, FULL_POWER};
     private int trials;
     private BayesianPidSearch completed;
     private double fullPowerSpeed, fullPowerRpm, peakPidPower;
@@ -25,7 +27,9 @@ public final class FlywheelCalibration extends CalibrationOp {
     @Override void calibrate() throws InterruptedException {
         Flywheel wheel = new Flywheel(hardwareMap, store);
         try {
-            if (confirm("标定实际 RPM？在飞轮上标记起点。A 进入手转测量，B 用 ticks/s。")) {
+            if (confirm(wheel.ticksPerRev > 0
+                    ? "A 重测每转计数，B 沿用已有 RPM 比例。"
+                    : "标定实际 RPM？在飞轮上标记起点。A 进入手转测量，B 用 ticks/s。")) {
                 calibrateScale(wheel);
                 wheel = new Flywheel(hardwareMap, store);
             }
@@ -89,7 +93,8 @@ public final class FlywheelCalibration extends CalibrationOp {
         telemetry.addData("PID 实测峰值功率", "%.2f", peakPidPower);
         for (BayesianPidSearch.Review row : completed.reviews()) {
             telemetry.addData(String.format(Locale.US, "P/I/D %.3f / %.3f / %.3f",
-                    row.gains[0], row.gains[1], row.gains[2]), "%d/4 组通过，%s", row.passed,
+                    row.gains[0], row.gains[1], row.gains[2]), "%d/%d 组通过，%s", row.passed,
+                    BayesianPidSearch.VERIFICATION_ROUNDS,
                     row.firstFailure == null ? "复测代价 " + row.score : row.firstFailure);
         }
     }
@@ -124,21 +129,22 @@ public final class FlywheelCalibration extends CalibrationOp {
         Measurements.PowerFit fit = new Measurements.PowerFit();
         Measurements referenceSpeeds = new Measurements(), fullSpeeds = new Measurements();
         try {
-            for (int pass = 0; pass < 2 && active(wheel); pass++) {
-                // Separate the two full-power measurements with another duty level.
-                if (pass == 1) measurePlateau(wheel, POWER_LEVELS[3], 3.5);
-                for (int index = 0; index < POWER_LEVELS.length && active(wheel); index++) {
-                    double power = POWER_LEVELS[pass == 0 ? index : POWER_LEVELS.length - 1 - index];
-                    double speed = measurePlateau(wheel, power, 4.5);
-                    if (!Double.isFinite(speed)) continue;
-                    fit.add(speed, power);
-                    if (power == POWER_LEVELS[3]) referenceSpeeds.add(speed);
-                    if (power == RobotConfig.FLYWHEEL_MAX_POWER) fullSpeeds.add(speed);
-                }
+            for (double power : POWER_LEVELS) {
+                if (!active(wheel)) break;
+                double speed = measurePlateau(wheel, power, 4.5);
+                fit.add(speed, power);
+                if (power == REFERENCE_POWER) referenceSpeeds.add(speed);
+                if (power == FULL_POWER) fullSpeeds.add(speed);
             }
-            if (active(wheel) && (fullSpeeds.size() < 2 || fullSpeeds.relativeSpread() > 0.04)) {
-                double speed = measurePlateau(wheel, RobotConfig.FLYWHEEL_MAX_POWER, 6.0);
-                fit.add(speed, RobotConfig.FLYWHEEL_MAX_POWER);
+            for (int repeat = 0; repeat < 2 && active(wheel); repeat++) {
+                if (fullSpeeds.size() >= 2 && fullSpeeds.relativeSpread() <= 0.04) break;
+                // Recheck the high end after a separate lower-duty plateau.
+                double reference = measurePlateau(wheel, REFERENCE_POWER, 3.5);
+                referenceSpeeds.add(reference);
+                fit.add(reference, REFERENCE_POWER);
+                if (!active(wheel)) break;
+                double speed = measurePlateau(wheel, FULL_POWER, repeat == 0 ? 4.5 : 6);
+                fit.add(speed, FULL_POWER);
                 fullSpeeds.add(speed);
             }
         } finally {
@@ -154,7 +160,7 @@ public final class FlywheelCalibration extends CalibrationOp {
             return false;
         }
         double reference = referenceSpeeds.size() > 0 ? referenceSpeeds.median()
-                : (0.70 - coefficients[0]) / coefficients[1];
+                : (REFERENCE_POWER - coefficients[0]) / coefficients[1];
         if (!(reference >= 20 && reference < full)) return false;
         double slope = (RobotConfig.FLYWHEEL_MAX_POWER - coefficients[0]) * reference / full;
         telemetry.log().add("实测功率 1.00 稳态 %s，共 %d 组。",
@@ -218,7 +224,7 @@ public final class FlywheelCalibration extends CalibrationOp {
     private BayesianPidSearch.Result pidTrial(Flywheel wheel, double[] current, double[] gains, double[] speeds,
                                                boolean verification, int pattern) throws InterruptedException {
         double low = speeds[0] * (verification ? 0.97 + 0.02 * pattern : 1);
-        double high = speeds[2] * (verification ? 0.985 + 0.005 * pattern : 1);
+        double high = speeds[2] * (verification && pattern == 0 ? 0.985 : 1);
         if (!active(wheel)) return null;
         wheel.setGains(current);
         trials++;
@@ -268,7 +274,7 @@ public final class FlywheelCalibration extends CalibrationOp {
             }
             StepScore response = new StepScore(STEP_DURATION);
             boolean[] runaway = {false};
-            boolean finished = runFor(STEP_DURATION, (t, dt) -> {
+            runFor(STEP_DURATION, (t, dt) -> {
                 wheel.sample(dt);
                 if (wheel.faulted()) return false;
                 if (wheel.speed > overspeed) {
@@ -277,16 +283,16 @@ public final class FlywheelCalibration extends CalibrationOp {
                 }
                 wheel.regulate(target, dt);
                 peakPidPower = Math.max(peakPidPower, wheel.output);
-                response.sample(t, dt, (wheel.speed - initial) / step, wheel.output);
-                response.sampleTolerance(t, Math.abs(wheel.speed - target)
+                response.sample(t, dt, (wheel.speed - initial) / step, wheel.output, Math.abs(wheel.speed - target)
                         <= target * RobotConfig.FLYWHEEL_SPEED_TOLERANCE);
                 show((verification ? "飞轮 PID 复测 " : "飞轮 PID 搜索 ") + trials,
                         "%s / %s，功率 %.2f，峰值 %.2f",
                         speedText(wheel.speed, testedRpm(wheel.speed)), speedText(target, testedRpm(target)),
                         wheel.output, peakPidPower);
-                return true;
+                return verification || !response.finishIfSettled(0.55);
             });
-            if (!finished) return runaway[0] ? new BayesianPidSearch.Result(10, -0.6, false, "转速保护") : null;
+            if (!active(wheel)) return null;
+            if (runaway[0]) return new BayesianPidSearch.Result(10, -0.6, false, "转速保护");
             boolean arrived = Double.isFinite(response.settlingTime(PID_HOLD));
             margin = Math.min(margin, 0.11 - response.overshoot() * Math.abs(step) / target);
             if (firstFailure.isEmpty() && (!arrived || margin < 0)) {

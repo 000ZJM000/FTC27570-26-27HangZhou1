@@ -13,15 +13,17 @@ final class TurretStability {
 
     static Result step(CalibrationOp op, Turret turret, double target, String label)
             throws InterruptedException {
-        return step(op, turret, target, label, 2.35);
+        return step(op, turret, target, label, 2.35, false, true);
     }
 
-    static Result pidStep(CalibrationOp op, Turret turret, double target, String label, boolean longMove)
+    static Result pidStep(CalibrationOp op, Turret turret, double target, String label, boolean longMove,
+                          boolean verification)
             throws InterruptedException {
-        return step(op, turret, target, label, longMove ? 2.45 : 1.55);
+        return step(op, turret, target, label, longMove ? 2.45 : 1.55, !verification, false);
     }
 
-    private static Result step(CalibrationOp op, Turret turret, double target, String label, double duration)
+    private static Result step(CalibrationOp op, Turret turret, double target, String label, double duration,
+                               boolean pidSearch, boolean baseline)
             throws InterruptedException {
         double initial = turret.angle;
         double delta = target - initial;
@@ -56,19 +58,18 @@ final class TurretStability {
                 }
                 if (Math.abs(error) < ERROR_LIMIT && Math.abs(turret.speed) < RATE_LIMIT) {
                     result.quiet += dt;
-                    if (result.quiet >= HOLD && !Double.isFinite(result.arrival)) result.arrival = time;
                 } else {
                     result.quiet = 0;
-                    result.arrival = Double.POSITIVE_INFINITY;
                 }
                 turret.control(target, 0, dt);
                 result.peakPower = Math.max(result.peakPower, Math.abs(turret.output()));
-                result.response.sample(time, dt, 1 - error / scale, turret.output());
-                result.response.sampleTolerance(time, Math.abs(error) <= RobotConfig.SHOT_AIM_TOLERANCE
+                result.response.sample(time, dt, 1 - error / scale, turret.output(),
+                        Math.abs(error) <= RobotConfig.SHOT_AIM_TOLERANCE
                         && Math.abs(turret.speed) <= Math.toRadians(15));
                 op.show(label, "误差 %+.2f°，速度 %+.0f°/s，功率 %+.2f / 峰值 %.2f",
                         Math.toDegrees(error), Math.toDegrees(turret.speed), turret.output(), result.peakPower);
-                return true;
+                if (baseline && result.quiet >= 0.40 && result.stable()) return false;
+                return !pidSearch || !result.response.finishIfSettled(0.36);
             });
         } finally { turret.stop(); }
         return result;
@@ -76,7 +77,7 @@ final class TurretStability {
 
     static final class Result {
         final StepScore response;
-        double overshoot, quiet, endError, endSpeed, peakPower, arrival = Double.POSITIVE_INFINITY;
+        double overshoot, quiet, endError, endSpeed, peakPower;
         int lastDirection, reversals;
         boolean unsafe, limitReached, readFailed;
 

@@ -14,9 +14,10 @@ public final class YawCalibration extends CalibrationOp {
         try {
             do {
                 if (!confirm("保持底盘静止，A 初始化 Pinpoint。")) return;
-                pose.startImu();
-                runFor(1.2, (t, dt) -> { pose.update(); return true; });
-                if (pose.headingValid) break;
+                if (pose.startImu()) {
+                    runFor(2.0, (t, dt) -> { pose.update(); return !pose.headingValid; });
+                    if (pose.headingValid) break;
+                }
                 telemetry.log().add("Pinpoint 航向未就绪：%s。", pose.status);
             } while (opModeIsActive() && !motionAborted());
             if (opModeIsActive() && !motionAborted()) new TurretYawCalibration(this).run(drive, pose);

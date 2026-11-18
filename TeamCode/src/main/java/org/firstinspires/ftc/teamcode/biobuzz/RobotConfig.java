@@ -1,7 +1,10 @@
 package org.firstinspires.ftc.teamcode.biobuzz;
 
-import com.qualcomm.robotcore.hardware.DcMotorSimple.Direction;
+import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver;
 import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver.EncoderDirection;
+import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver.ErrorDetectionType;
+import com.qualcomm.robotcore.hardware.DcMotorSimple.Direction;
+import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 
 public final class RobotConfig {
     // Expansion Hub 2: m-1 (0), m-2 (1), m-7 (2), m-8 (3); SL (0), ST (1); Pinpoint I2C bus 0.
@@ -71,6 +74,16 @@ public final class RobotConfig {
     public static final double SL_UP = 0.825, SR_UP = 0.16;
     public static final double SB_IDLE = 0.25, SB_FIRE = 0.60;
     public static final double ST_HOME = 0.47, ST_HIGH = 0.05;
+
+    static int configurePinpoint(GoBildaPinpointDriver device) {
+        int version = device.getDeviceVersion();
+        if (version < 1) throw new IllegalStateException("Pinpoint firmware version unavailable");
+        device.setErrorDetectionType(version >= 3 ? ErrorDetectionType.CRC : ErrorDetectionType.LOCAL_TEST);
+        device.setOffsets(-X_POD_RIGHT_MM, Y_POD_FORWARD_MM, DistanceUnit.MM);
+        device.setEncoderDirections(X_POD_DIRECTION, Y_POD_DIRECTION);
+        device.setEncoderResolution(POD_TICKS_PER_MM, DistanceUnit.MM);
+        return version;
+    }
 
     private RobotConfig() {}
 }

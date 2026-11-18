@@ -4,6 +4,7 @@ public final class TurretRange {
     private final double low, high;
     private int direction;
     private boolean rewindTargetMoves;
+    private double previousTarget = Double.NaN;
     public boolean rewinding, reachable, predicted;
 
     public TurretRange(double span) {
@@ -14,6 +15,7 @@ public final class TurretRange {
     public void reset() {
         finishRewind();
         reachable = false;
+        previousTarget = Double.NaN;
     }
 
     public void finishRewind() {
@@ -30,21 +32,28 @@ public final class TurretRange {
             double forecast = equivalent(bearing + relativeRate * lookahead);
             double nearCurrent = current + Maths.wrap(bearing - current);
             double edge = relativeRate > 0 ? high : low;
-            boolean atEdge = Math.abs(current - edge) <= Math.toRadians(26);
+            boolean atEdge = Math.abs(current - edge) <= Math.toRadians(26)
+                    && Math.abs(previousTarget - edge) <= Math.toRadians(26);
             boolean towardEdge = (nearCurrent - edge) * Math.signum(relativeRate) >= -Math.toRadians(12);
             boolean crosses = Math.abs(relativeRate) > 0.20 && atEdge && towardEdge && forecast <= high
                     && (edge - forecast) * Math.signum(relativeRate) > Math.PI;
             if (crosses) start(-Math.signum(relativeRate), true);
-            else if (reachable && Math.abs(equivalent - current) > Math.PI) {
+            else if (reachable && Math.abs(equivalent - previousTarget) > Math.PI
+                    && Math.abs(equivalent - current) > Math.PI) {
                 start(Math.signum(equivalent - current), false);
             }
-            if (!rewinding) return reachable ? equivalent : Maths.clip(nearCurrent, low, high);
+            // An initial acquisition or a newly selected field goal takes the normal PID path.
+            if (!rewinding) {
+                previousTarget = reachable ? equivalent : Maths.clip(nearCurrent, low, high);
+                return previousTarget;
+            }
         }
         double destination = direction > 0 ? high : low;
         double branch = destination + Maths.wrap(bearing - destination);
         if (reachable && (equivalent - destination) * direction > -Math.PI) branch = equivalent;
         rewindTargetMoves = branch > low && branch < high;
-        return Maths.clip(branch, low, high);
+        previousTarget = Maths.clip(branch, low, high);
+        return previousTarget;
     }
 
     private void start(double direction, boolean predicted) {

@@ -2,15 +2,31 @@ package org.firstinspires.ftc.teamcode.biobuzz;
 
 /** Per-direction duty versus speed model identified from short, open-loop pulses. */
 public final class TurretPlant {
+    private static final double[] DEFAULT = {
+        0.09, 0.068, 0.11, 0.22, 0.05, 0.09, 0.068, 0.11, 0.22, 0.05, 0.85
+    };
     private final double[] values;
+    private final boolean identified;
 
-    public TurretPlant(double... values) { this.values = values.clone(); }
-
-    public static TurretPlant load(CalibrationStore store) {
-        return new TurretPlant(store.read(CalibrationStore.TURRET_PLANT,
-                0.09, 0.068, 0.11, 0.22, 0.05, 0.09, 0.068, 0.11, 0.22, 0.05, 0.85));
+    public TurretPlant(double... values) {
+        identified = valid(values);
+        this.values = (identified ? values : DEFAULT).clone();
     }
 
+    public static TurretPlant load(CalibrationStore store) {
+        return new TurretPlant(store.readExact(CalibrationStore.TURRET_PLANT, DEFAULT.length));
+    }
+
+    private static boolean valid(double[] values) {
+        if (values == null || values.length != DEFAULT.length || !Maths.finite(values)) return false;
+        for (int i : new int[]{0, 5}) {
+            if (values[i] <= 0 || values[i] > 1 || values[i + 1] < 0 || values[i + 1] > 1
+                    || values[i + 2] <= 0 || values[i + 3] <= 0 || values[i + 4] < 0) return false;
+        }
+        return values[10] > 0;
+    }
+
+    public boolean identified() { return identified; }
     private int side(int direction) { return direction > 0 ? 0 : 5; }
     public double breakaway(int direction) { return values[side(direction)]; }
     public double rolling(int direction) { return values[side(direction) + 1]; }

@@ -4,6 +4,7 @@ FTC 27570 在 2026–2027 BIOBUZZ 赛季使用的机器人控制程序。项目�
 
 - **比赛主控** · Driver Station → TeleOp → **BIOBUZZ 360 云台 + 无头**
 - **硬件自测** · Driver Station → TeleOp → **BIOBUZZ 自测**，依次运行 **02 → 03 → 04 → 05**
+- **定位诊断** · Driver Station → TeleOp → **BIOBUZZ 诊断 → goBILDA Pinpoint Example**
 - **详细接线、坐标和自测流程** · [BIOBUZZ 上车指南](BIOBUZZ-上车指南.md)
 
 ## 构建与部署
@@ -47,9 +48,11 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | 02 | **02 自测云台 行程 摩擦 刹车模型** | 教学云台方向和机械限位，测量摩擦和刹车模型 |
 | 03 | **03 自测云台反转补偿** | 轮子落地，测量底盘转动对云台的影响并拟合补偿 |
 | 04 | **04 自测飞轮 转速和 PID** | 标定飞轮编码器 RPM 比例，测量功率—转速曲线并整定 PID |
-| 05 | **05 自测云台 PID 与回转** | 整定云台 PID，按提示运行回转验证 |
+| 05 | **05 自测云台 PID 与回转** | 整定云台 PID。行程达到 270° 时，双向回转通过后保存参数 |
 
-标定结果保存在 Robot Controller 的应用数据中。换 Hub 或清除应用数据后需要重新标定。重做云台行程标定时，程序会清除依赖旧行程的云台模型与参数。
+标定结果保存在 Robot Controller 的应用数据中。换 Hub 或清除应用数据后需要重新标定。02 的动力学或摩擦表改变后，需要重做 03 和 05。重新教学行程时，若编码器或电机旋向改变，需要重测动力学和摩擦表。行程变化超过 2° 时，需要重测摩擦表并重做 03 和 05。
+
+主程序 INIT 会显示实际加载的 PID 数值、02 刹车模型与摩擦表，以及 03 左右补偿。运行中按住 **Back** 可以查看目标角、PID 设定角、行程角、角速度和可用功率。自动瞄准与跨接缝回转共用已加载的角度 PID。
 
 ## 比赛操控
 
@@ -73,6 +76,12 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | Y | 将机器人放回 INIT 输入的起点和朝向后，重新对齐场地坐标 |
 | Back（按住） | 查看 Pinpoint 航向、里程轮读数和云台诊断 |
 
+### Pinpoint 诊断
+
+启动 **goBILDA Pinpoint Example**，INIT 时保持底盘静止，START 后用左摇杆平移、右摇杆横向转向。屏幕显示位置、速度、原始编码器计数、坏读次数和最近异常，异常同时写入 Robot Controller 日志。停稳后按 **A** 将位姿归零并重校 IMU，按 **B** 仅重校 IMU。
+
+主程序遇到坏读或航向跳变时会补读一次。补读成功计入诊断统计，连续失败时保留上一帧有效位置，并在最长 120 ms 内用上一帧角速度推算航向。需要重新对齐时，将机器人放回 INIT 输入的起点和朝向，再按 **Y**。
+
 ### 自动瞄准与射击
 
 - 默认自动瞄准。场地右坐标小于 3 格时瞄准 **右 2、前 2.5**，到达 3 格时切换到 **右 4、前 2.5**。按下 **RT** 时会请求自动瞄准。
@@ -86,6 +95,7 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | [BioBuzzTeleOp.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/BioBuzzTeleOp.java) | 比赛主控，协调手柄输入、底盘、定位、瞄准、供弹与状态灯 |
 | [RobotConfig.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/RobotConfig.java) | 硬件名称、方向、机械尺寸、里程轮参数和功率限制 |
 | [PinpointPose.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/PinpointPose.java) | Pinpoint 读数校验、场地坐标对齐和定位异常处理 |
+| [SensorGoBildaPinpointExample.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/SensorGoBildaPinpointExample.java) | 车头模式驾驶、Pinpoint 原始读数与异常日志诊断 |
 | [FieldTargets.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/FieldTargets.java) / [ShooterProfile.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/ShooterProfile.java) | 场地得分点、禁射区及射击目标转速 |
 | [Turret.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/Turret.java) / [Flywheel.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/Flywheel.java) | 云台角度与回转控制、飞轮闭环调速和挡弹控制 |
 | [calibration/](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration) | 自测 OpMode、模型拟合与 PID 参数搜索 |

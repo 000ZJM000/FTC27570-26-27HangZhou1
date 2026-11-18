@@ -4,11 +4,13 @@ final class StepScore {
     private final double duration;
     private double errorArea, overshoot, tailTime, tailError, tailSquare, effort, lastPower;
     private double lastSample, withinToleranceSince = Double.NaN;
+    private double quietTime, quietError, quietSquare, quietAbsolute;
+    private boolean endedEarly;
 
     StepScore(double duration) { this.duration = duration; }
 
     // Each response is scaled by the step size to score different magnitudes in the same units.
-    void sample(double time, double dt, double progress, double power) {
+    void sample(double time, double dt, double progress, double power, boolean withinTolerance) {
         double error = 1 - progress;
         errorArea += Math.abs(error) * dt;
         overshoot = Math.max(overshoot, -error);
@@ -19,12 +21,22 @@ final class StepScore {
             tailError += error * dt;
             tailSquare += error * error * dt;
         }
+        lastSample = time;
+        if (withinTolerance) {
+            if (!Double.isFinite(withinToleranceSince)) withinToleranceSince = time;
+            quietTime += dt;
+            quietError += error * dt;
+            quietSquare += error * error * dt;
+            quietAbsolute += Math.abs(error) * dt;
+        } else {
+            withinToleranceSince = Double.NaN;
+            quietTime = quietError = quietSquare = quietAbsolute = 0;
+        }
     }
 
-    void sampleTolerance(double time, boolean withinTolerance) {
-        lastSample = time;
-        if (!withinTolerance) withinToleranceSince = Double.NaN;
-        else if (!Double.isFinite(withinToleranceSince)) withinToleranceSince = time;
+    boolean finishIfSettled(double hold) {
+        endedEarly = Double.isFinite(settlingTime(hold));
+        return endedEarly;
     }
 
     double settlingTime(double hold) {
@@ -39,9 +51,17 @@ final class StepScore {
     double overshoot() { return overshoot; }
 
     double score() {
+        if (endedEarly) {
+            // Estimate the unmeasured remainder using the actual settled window.
+            double area = errorArea + Math.max(0, duration - lastSample) * quietAbsolute / quietTime;
+            return score(area, quietError / quietTime, quietSquare / quietTime);
+        }
         if (tailTime < duration * 0.12) return Double.POSITIVE_INFINITY;
-        double mean = tailError / tailTime;
-        double deviation = Math.sqrt(Math.max(0, tailSquare / tailTime - mean * mean));
-        return errorArea / duration + 1.8 * Math.abs(mean) + 2 * deviation + 1.5 * overshoot + 0.07 * effort;
+        return score(errorArea, tailError / tailTime, tailSquare / tailTime);
+    }
+
+    private double score(double area, double mean, double meanSquare) {
+        double deviation = Math.sqrt(Math.max(0, meanSquare - mean * mean));
+        return area / duration + 1.8 * Math.abs(mean) + 2 * deviation + 1.5 * overshoot + 0.07 * effort;
     }
 }

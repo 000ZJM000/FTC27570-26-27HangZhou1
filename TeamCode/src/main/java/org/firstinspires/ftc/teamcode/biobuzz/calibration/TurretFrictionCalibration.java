@@ -9,7 +9,7 @@ import org.firstinspires.ftc.teamcode.biobuzz.TurretPlant;
 
 final class TurretFrictionCalibration {
     private static final int SECTORS = TurretFriction.SECTORS;
-    private static final int REPEATS = 4;
+    private static final int[] PASSES = {0, 3, 1, 2};
     private final CalibrationOp op;
 
     TurretFrictionCalibration(CalibrationOp op) { this.op = op; }
@@ -17,20 +17,15 @@ final class TurretFrictionCalibration {
     boolean run(Turret turret) throws InterruptedException {
         Bin[][] data = new Bin[SECTORS][2];
         for (Bin[] row : data) for (int side = 0; side < 2; side++) row[side] = new Bin();
-        for (int pass = 0; pass < REPEATS && active(); pass++) {
+        for (int round = 0; round < PASSES.length && active(); round++) {
             for (int i = 0; i < SECTORS && active(); i++) {
-                int sector = pass % 2 == 0 ? i : SECTORS - i - 1;
+                int sector = round % 2 == 0 ? i : SECTORS - i - 1;
                 for (int j = 0; j < 2 && active(); j++) {
-                    int direction = (j + pass + sector) % 2 == 0 ? 1 : -1;
-                    measure(turret, data[sector][TurretFriction.side(direction)], sector, direction, pass);
-                }
-            }
-        }
-        for (int sector = 0; sector < SECTORS && active(); sector++) {
-            for (int direction : new int[]{1, -1}) {
-                Bin bin = data[sector][TurretFriction.side(direction)];
-                for (int retry = 0; bin.start.size() < 2 && retry < 2 && active(); retry++) {
-                    measure(turret, bin, sector, direction, retry + 1);
+                    int direction = (j + round + sector) % 2 == 0 ? 1 : -1;
+                    Bin bin = data[sector][TurretFriction.side(direction)];
+                    if (!bin.consistent() || bin.movingCount < 2) {
+                        measure(turret, bin, sector, direction, PASSES[round], round + 1);
+                    }
                 }
             }
         }
@@ -38,23 +33,20 @@ final class TurretFrictionCalibration {
         return save(data);
     }
 
-    private void measure(Turret turret, Bin bin, int sector, int direction, int pass) throws InterruptedException {
+    private void measure(Turret turret, Bin bin, int sector, int direction, int pulse, int round)
+            throws InterruptedException {
         double width = TurretFriction.width(turret.span());
-        double target = TurretFriction.center(sector, turret.span()) + (pass - 1.5) * 0.12 * width;
+        double target = TurretFriction.center(sector, turret.span()) + (pulse - 1.5) * 0.12 * width;
         double tolerance = Math.min(Math.toRadians(1.8), width * 0.18);
         if (!TurretMotion.go(op, turret, target, tolerance)) return;
-        double[] origin = {turret.angle};
+        double origin = turret.angle;
         double[] onset = {-1, 0, 0};
         Measurements speeds = new Measurements(), duty = new Measurements();
         try {
             op.runFor(1.8, (time, dt) -> {
                 turret.sample(dt);
                 if (!turret.encoderReady() || !turret.motorResponding()) return false;
-                if (time < 0.09) {
-                    origin[0] = turret.angle;
-                    return true;
-                }
-                double movement = direction * (turret.angle - origin[0]);
+                double movement = direction * (turret.angle - origin);
                 double speed = direction * turret.speed;
                 if (onset[0] < 0 && movement > Math.toRadians(0.38) && speed > 0.09) {
                     onset[0] = time;
@@ -66,10 +58,10 @@ final class TurretFrictionCalibration {
                 if (Math.abs(movement) > maxMotion || available < RobotConfig.TURRET_MARGIN + Math.toRadians(1)) {
                     return false;
                 }
-                double power = Math.min(0.66, 0.025 + (time - 0.09) * (0.39 + pass * 0.025));
+                double power = Math.min(0.66, 0.025 + time * (0.39 + pulse * 0.025));
                 if (onset[0] >= 0) {
                     if (time - onset[0] > 0.19) return false;
-                    power = Math.min(0.72, onset[1] + 0.04 + pass * 0.044);
+                    power = Math.min(0.72, onset[1] + 0.04 + pulse * 0.044);
                     if (time - onset[0] > 0.075 && speed > 0.15
                             && Math.abs(turret.angle - onset[2]) < width * 0.52) {
                         speeds.add(speed);
@@ -78,7 +70,7 @@ final class TurretFrictionCalibration {
                 }
                 turret.power(direction * power);
                 op.show("整圈摩擦测量", "%d/%d 段，%s，第 %d 次",
-                        sector + 1, SECTORS, direction > 0 ? "左转" : "右转", pass + 1);
+                        sector + 1, SECTORS, direction > 0 ? "左转" : "右转", round);
                 return true;
             });
         } finally {
@@ -98,7 +90,7 @@ final class TurretFrictionCalibration {
             int count = 0;
             for (int sector = 0; sector < SECTORS; sector++) {
                 Bin bin = data[sector][side];
-                if (bin.start.size() >= 2) count++;
+                if (bin.consistent()) count++;
             }
             if (count < 8) {
                 op.telemetry.log().add("%s有效段仅 %d/%d，保留原摩擦表。", direction > 0 ? "左转" : "右转",
@@ -109,7 +101,7 @@ final class TurretFrictionCalibration {
             op.telemetry.log().add("%s有效摩擦测量 %d/%d 段", direction > 0 ? "左转" : "右转", count, SECTORS);
             for (int sector = 0; sector < SECTORS; sector++) {
                 Bin bin = data[sector][side];
-                if (bin.start.size() < 2) continue;
+                if (!bin.consistent()) continue;
                 int i = TurretFriction.index(sector, direction);
                 model[i] = Maths.clip(0.96 * bin.start.median(), 0.02, 0.62);
                 Measurements rolling = new Measurements();
@@ -128,8 +120,10 @@ final class TurretFrictionCalibration {
 
     private static final class Bin {
         final Measurements start = new Measurements();
-        final double[] speeds = new double[REPEATS + 2], powers = new double[speeds.length];
+        final double[] speeds = new double[PASSES.length], powers = new double[speeds.length];
         int movingCount;
+
+        boolean consistent() { return start.size() >= 2 && start.relativeSpread() <= 0.17; }
 
         void addMoving(double speed, double power) {
             speeds[movingCount] = speed;

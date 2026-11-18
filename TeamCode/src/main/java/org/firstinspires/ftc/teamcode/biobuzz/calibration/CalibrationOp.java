@@ -8,6 +8,7 @@ import org.firstinspires.ftc.teamcode.biobuzz.RearStatusLed;
 abstract class CalibrationOp extends LinearOpMode {
     CalibrationStore store;
     private boolean motionAborted;
+    private double nextDisplay;
     private RearStatusLed lights;
 
     @Override public final void runOpMode() throws InterruptedException {
@@ -98,6 +99,9 @@ abstract class CalibrationOp extends LinearOpMode {
     }
 
     void show(String task, String format, Object... values) {
+        double now = Maths.time();
+        if (now < nextDisplay) return;
+        nextDisplay = now + 0.10;
         telemetry.addLine(task);
         telemetry.addData("测量", format, values);
         telemetry.addLine("B 停止当前动作");

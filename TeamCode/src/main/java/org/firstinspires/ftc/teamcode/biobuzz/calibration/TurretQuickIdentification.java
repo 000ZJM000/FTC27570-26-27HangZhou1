@@ -62,8 +62,7 @@ final class TurretQuickIdentification {
             turret.tune(scale);
             if (TurretMotion.go(op, turret, center, Math.toRadians(1.1))
                     && TurretStability.step(op, turret, center + step, "快速基线验证").stable()
-                    && TurretStability.step(op, turret, center - step, "快速基线验证").stable()
-                    && TurretMotion.go(op, turret, center, Math.toRadians(1.1))) {
+                    && TurretStability.step(op, turret, center - step, "快速基线验证").stable()) {
                 model[10] = scale;
                 op.telemetry.log().add("开环辨识和双向稳定性验证通过，带宽比例 %.2f。", scale);
                 return active() && op.save(CalibrationStore.TURRET_PLANT, model);

@@ -3,7 +3,6 @@ package org.firstinspires.ftc.teamcode.biobuzz.calibration;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import org.firstinspires.ftc.teamcode.biobuzz.CalibrationStore;
 import org.firstinspires.ftc.teamcode.biobuzz.Turret;
-import org.firstinspires.ftc.teamcode.biobuzz.TurretPlant;
 
 import java.util.List;
 import java.util.Locale;
@@ -11,7 +10,8 @@ import java.util.Locale;
 @TeleOp(name = "05 自测云台 PID 与回转", group = "BIOBUZZ 自测")
 public final class TurretPidCalibration extends CalibrationOp {
     private static final double HOLD = 0.12;
-    private static final double[] VERIFICATION_CENTERS = {0.27, 0.35, 0.24, 0.39};
+    private static final double[] VERIFICATION_CENTERS = {0.27, 0.39};
+    private static final int[] SEARCH_POSITIONS = {0, 2, 4, 5, 3, 1};
     private int trials;
     private BayesianPidSearch completed;
     private String outcome;
@@ -35,9 +35,9 @@ public final class TurretPidCalibration extends CalibrationOp {
             if (!active() || !turret.encoderReady()) return;
             turret.teachingMode(false);
             if (!confirm("A 开始 20–32 轮搜索及留出复测。停滞会提前收尾。")) return;
-            TurretPlant plant = TurretPlant.load(store);
-            double[] seed = plant.pidSeed(plant.baseline());
-            double[] current = store.read(CalibrationStore.TURRET_PID, seed);
+            double[] current = turret.pidGains();
+            telemetry.log().add("起始 PID %s，P/I/D %.3f / %.3f / %.3f", turret.usesSavedPid() ? "已保存" : "基线",
+                    current[0], current[1], current[2]);
             BayesianPidSearch search = new BayesianPidSearch(
                     new double[]{Math.max(4.0, 1.6 * current[0]), Math.max(0.80, 1.6 * current[1]),
                             Math.max(0.32, 1.8 * current[2])},
@@ -51,22 +51,27 @@ public final class TurretPidCalibration extends CalibrationOp {
             if (active() && search.searchCount() > 0) {
                 save(CalibrationStore.TURRET_PID_HISTORY, search.history());
             }
-            double[] selected = current;
             if (best != null && active()) {
-                boolean saved = save(CalibrationStore.TURRET_PID, best.gains);
-                if (saved) selected = best.gains;
-                outcome = saved ? String.format(Locale.US, "已保存，复测代价 %.3f", best.score)
-                        : "复测通过，写入失败";
+                turret.setPidGains(best.gains);
+                if (TurretRewindCheck.supported(turret)) {
+                    TurretRewindCheck check = new TurretRewindCheck(this, turret);
+                    rewindOutcome = check.run();
+                    if (!check.passed() || !active()) {
+                        turret.setPidGains(current);
+                        outcome = "双向回转未通过，保留当前 PID";
+                        telemetry.log().add("%s", outcome);
+                        return;
+                    }
+                } else rewindOutcome = "行程不足 270°，仅做阶跃复测";
+                boolean saved = active() && save(CalibrationStore.TURRET_PID, best.gains);
+                if (!saved) turret.setPidGains(current);
+                outcome = saved ? String.format(Locale.US, "已保存，复测代价 %.3f", best.score) : "PID 未写入";
                 telemetry.log().add("%s，P/I/D %.3f / %.3f / %.3f",
                         outcome, best.gains[0], best.gains[1], best.gains[2]);
             } else if (active()) {
                 outcome = search.searchCount() < BayesianPidSearch.MIN_ROUNDS ? "有效搜索轮数不足，保留当前 PID"
                         : "没有一组参数全部通过复测，保留当前 PID";
                 telemetry.log().add("%s", outcome);
-            }
-            if (active()) {
-                turret.setPidGains(selected);
-                rewindOutcome = new TurretRewindCheck(this, turret).run();
             }
         } finally {
             turret.teachingMode(false);
@@ -85,7 +90,7 @@ public final class TurretPidCalibration extends CalibrationOp {
         for (int i = 0; i < results.size(); i++) {
             BayesianPidSearch.Review row = results.get(i);
             String title = i == 0 ? "原 PID" : "候选 " + i;
-            telemetry.addData(title, "%d/4 组通过，%s", row.passed,
+            telemetry.addData(title, "%d/%d 组通过，%s", row.passed, BayesianPidSearch.VERIFICATION_ROUNDS,
                     row.firstFailure == null ? "复测代价 " + costText(row.score) : row.firstFailure);
             telemetry.addData(title + " P/I/D", "%.3f / %.3f / %.3f", row.gains[0], row.gains[1], row.gains[2]);
         }
@@ -98,6 +103,7 @@ public final class TurretPidCalibration extends CalibrationOp {
     private BayesianPidSearch.Result trial(Turret turret, double[] current, double[] gains,
                                            boolean verification, int pattern) throws InterruptedException {
         double span = turret.span();
+        if (!verification) pattern = SEARCH_POSITIONS[pattern];
         double sign = pattern % 2 == 0 ? 1 : -1;
         double band = verification ? VERIFICATION_CENTERS[pattern] : 0.24 + 0.055 * (pattern / 2);
         double center = span * (sign > 0 ? band : 1 - band);
@@ -127,7 +133,7 @@ public final class TurretPidCalibration extends CalibrationOp {
                 continue;
             }
             TurretStability.Result run = TurretStability.pidStep(this, turret, target,
-                    (verification ? "云台 PID 复测 " : "云台 PID 搜索 ") + trials, i >= 2);
+                    (verification ? "云台 PID 复测 " : "云台 PID 搜索 ") + trials, i >= 2, verification);
             peakPower = Math.max(peakPower, run.peakPower);
             if (!active()) return null;
             if (run.readFailed) return BayesianPidSearch.Result.unavailable(step + " 编码器或电机读数中断");

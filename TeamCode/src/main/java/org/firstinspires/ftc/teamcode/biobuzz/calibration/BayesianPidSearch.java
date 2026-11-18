@@ -13,7 +13,8 @@ import java.util.function.BooleanSupplier;
 final class BayesianPidSearch {
     static final int MIN_ROUNDS = 20, MAX_ROUNDS = 32;
     static final int HISTORY_STRIDE = 6, HISTORY_ROWS = 40;
-    private static final int FINALISTS = 4, REPEATS = 4, RECORD_PATIENCE = 8;
+    static final int VERIFICATION_ROUNDS = 2;
+    private static final int FINALISTS = 3, RECORD_PATIENCE = 8;
     private final double[] max, scale;
     private final Random random = new Random(27270);
     private final List<Observation> data = new ArrayList<>();
@@ -136,13 +137,14 @@ final class BayesianPidSearch {
             if (finalists.stream().noneMatch(x -> distance(x, o.x) <= 0.035)) finalists.add(o.x);
             if (finalists.size() == FINALISTS) break;
         }
-        double[][] costs = new double[finalists.size()][REPEATS];
+        double[][] costs = new double[finalists.size()][VERIFICATION_ROUNDS];
         int[] passed = new int[finalists.size()];
         String[] firstFailure = new String[finalists.size()];
-        for (int repeat = 0; repeat < REPEATS; repeat++) {
+        for (int repeat = 0; repeat < VERIFICATION_ROUNDS; repeat++) {
             for (int i = 0; i < finalists.size(); i++) {
                 if (cancelled.getAsBoolean()) return null;
                 int j = (i + repeat) % finalists.size();
+                if (firstFailure[j] != null) continue;
                 double[] candidate = gains(finalists.get(j));
                 Result result = trial.test(candidate, true, repeat);
                 if (!measured(result) && !cancelled.getAsBoolean()) {
@@ -161,11 +163,11 @@ final class BayesianPidSearch {
             }
         }
         int winner = 0;
-        double verifiedBest = validationScore(costs[0]);
+        double verifiedBest = Double.POSITIVE_INFINITY;
         for (int i = 0; i < costs.length; i++) {
-            double value = validationScore(costs[i]);
+            double value = passed[i] == VERIFICATION_ROUNDS ? validationScore(costs[i]) : Double.POSITIVE_INFINITY;
             reviews.add(new Review(gains(finalists.get(i)), passed[i], value, firstFailure[i]));
-            if (i > 0 && value < 0.98 * verifiedBest) {
+            if (value < 0.98 * verifiedBest) {
                 verifiedBest = value;
                 winner = i;
             }

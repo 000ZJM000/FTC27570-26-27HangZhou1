@@ -2,19 +2,20 @@ package org.firstinspires.ftc.teamcode.biobuzz;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import java.util.Arrays;
 
 public final class CalibrationStore {
     public static final String HOME = "turret_geometry";
     public static final String TURRET_PLANT = "turret_quick_identification_v1";
     public static final String TURRET_FRICTION_MAP = "turret_friction_by_angle_v2";
     public static final String TURRET_PID = "turret_single_pid_bayes_v1";
-    public static final String TURRET_PID_HISTORY = "turret_pid_long_step_history_v1";
+    public static final String TURRET_PID_HISTORY = "turret_pid_long_step_history_v2";
     public static final String TURRET_COUPLED_DYNAMICS = "turret_chassis_state_ff_v1";
     public static final String FLYWHEEL_SCALE = "flywheel_scale";
     public static final String FLYWHEEL_MODEL = "flywheel_model";
     public static final String FLYWHEEL_FULL_POWER_MODEL = "flywheel_model_full_power_v1";
     public static final String FLYWHEEL_PID = "flywheel_pid";
-    public static final String FLYWHEEL_PID_HISTORY = "flywheel_pid_full_power_history_v1";
+    public static final String FLYWHEEL_PID_HISTORY = "flywheel_pid_full_power_history_v2";
 
     private final SharedPreferences prefs;
 
@@ -24,6 +25,10 @@ public final class CalibrationStore {
 
     public double[] read(String key, double... fallback) {
         return readRecords(key, 1, fallback.length, fallback.length, fallback);
+    }
+
+    public double[] readExact(String key, int count) {
+        return readRecords(key, count, count, count, null);
     }
 
     public double[] readHistory(String key, int stride, int rows) {
@@ -52,12 +57,20 @@ public final class CalibrationStore {
             result.append(value);
         }
         SharedPreferences.Editor edit = prefs.edit().putString(key, result.toString());
-        if (HOME.equals(key)) {
-            edit.remove(TURRET_PLANT).remove(TURRET_FRICTION_MAP).remove(TURRET_PID)
-                    .remove(TURRET_PID_HISTORY).remove(TURRET_COUPLED_DYNAMICS);
+        if (HOME.equals(key) && values.length == 4) {
+            double[] previous = readExact(HOME, 4);
+            if (previous == null || values[0] != previous[0] || values[1] != previous[1]) {
+                edit.remove(TURRET_PLANT).remove(TURRET_FRICTION_MAP);
+                clearTurretTuning(edit);
+            } else if (Math.abs(values[2] - previous[2]) > Math.toRadians(2)) {
+                edit.remove(TURRET_FRICTION_MAP);
+                clearTurretTuning(edit);
+            }
         }
-        if (TURRET_PLANT.equals(key) || TURRET_FRICTION_MAP.equals(key)) {
-            edit.remove(TURRET_PID).remove(TURRET_PID_HISTORY).remove(TURRET_COUPLED_DYNAMICS);
+        if ((TURRET_PLANT.equals(key) || TURRET_FRICTION_MAP.equals(key))
+                && !Arrays.equals(values, readExact(key, values.length))) {
+            if (TURRET_PLANT.equals(key)) edit.remove(TURRET_FRICTION_MAP);
+            clearTurretTuning(edit);
         }
         if (FLYWHEEL_FULL_POWER_MODEL.equals(key) && fullPowerModelChanged(values)) {
             edit.remove(FLYWHEEL_PID_HISTORY);
@@ -70,6 +83,10 @@ public final class CalibrationStore {
     }
 
     public boolean has(String key) { return prefs.contains(key); }
+
+    private static void clearTurretTuning(SharedPreferences.Editor edit) {
+        edit.remove(TURRET_PID).remove(TURRET_PID_HISTORY).remove(TURRET_COUPLED_DYNAMICS);
+    }
 
     private boolean fullPowerModelChanged(double[] model) {
         if (model.length != 4) return true;

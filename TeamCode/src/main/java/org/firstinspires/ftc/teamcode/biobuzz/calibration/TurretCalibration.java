@@ -18,8 +18,10 @@ public final class TurretCalibration extends CalibrationOp {
             turret.teachingMode(true);
             if (!confirm("把云台轻轻摆到最右端，停稳后 A。")) return;
             homeTick = turret.rawTicks();
+            boolean taught = false;
             if (confirm("重测零位方向、正前和行程？已有标定可按 B 跳过。")) {
-                if (teach(turret)) turret = new Turret(hardwareMap, store);
+                taught = teach(turret);
+                if (taught) turret = new Turret(hardwareMap, store);
                 else telemetry.log().add("本次几何数据无效，尝试沿用之前的标定。");
             }
             if (!turret.calibrated() || !opModeIsActive()) {
@@ -27,15 +29,18 @@ public final class TurretCalibration extends CalibrationOp {
                 return;
             }
             turret.homeAtRight(homeTick);
-            if (!center(turret)) return;
-            while (!new TurretQuickIdentification(this, turret).run()) {
-                if (!opModeIsActive() || motionAborted()
-                        || !confirm("快速基线未通过。A 回中后重试，B 结束。") || !center(turret)) return;
+            if (!turret.plantIdentified() || confirm("现有刹车模型可沿用。A 重测，B 直接进入摩擦测量。")) {
+                if (!center(turret)) return;
+                while (!new TurretQuickIdentification(this, turret).run()) {
+                    if (!opModeIsActive() || motionAborted()
+                            || !confirm("快速基线未通过。A 回中后重试，B 结束。") || !center(turret)) return;
+                }
             }
-            if (confirm("整段行程分 12 段，各段双向测摩擦，每向 4 次。按 A 开始。")) {
+            turret.teachingMode(false);
+            if (confirm("整段行程分 12 段，双向各测两次，样本不足才补测。按 A 开始。")) {
                 new TurretFrictionCalibration(this).run(turret);
             }
-            if (!motionAborted()) verifyEncoderReturn(turret);
+            if (taught && !motionAborted()) verifyEncoderReturn(turret);
         } finally {
             turret.teachingMode(false);
         }

@@ -46,13 +46,5 @@ final class Measurements {
             return new double[]{Math.max(0, intercepts.median()), slope};
         }
 
-        double[] fitWithKnownIntercept(double intercept) {
-            Measurements ratios = new Measurements();
-            for (double[] point : points) {
-                if (point[1] > intercept) ratios.add((point[1] - intercept) / point[0]);
-            }
-            return ratios.size() >= 2 && ratios.relativeSpread() <= 0.35
-                    ? new double[]{intercept, ratios.median()} : null;
-        }
     }
 }

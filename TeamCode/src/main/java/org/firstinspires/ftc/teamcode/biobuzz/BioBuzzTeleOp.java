@@ -44,8 +44,8 @@ public final class BioBuzzTeleOp extends LinearOpMode {
                         startRight, startForward, startHeading);
                 telemetry.addData("Pinpoint", pose.status);
                 if (!lights.configured()) telemetry.addData("尾灯", "未配置 LED");
-                telemetry.addData("云台", turret == null || !turret.calibrated() ? "先运行 02 自测"
-                        : store.has(CalibrationStore.TURRET_PLANT) ? "已通过快速辨识" : "默认保守参数，建议跑 02");
+                if (turret == null || !turret.calibrated()) telemetry.addData("云台", "先运行 02 自测");
+                else showTurretCalibration(turret);
                 telemetry.addData("飞轮", shooter != null && shooter.rpmCalibrated()
                         ? String.format("START 后怠速 %.0f RPM", RobotConfig.FLYWHEEL_IDLE_RPM)
                         : "先运行 04，自测 RPM 比例和转速曲线");
@@ -60,22 +60,22 @@ public final class BioBuzzTeleOp extends LinearOpMode {
             lastX = gamepad1.x;
             lastA = gamepad1.a;
             lastY = gamepad1.y;
+            if (!imuStarted) imuStarted = pose.startImu();
             pose.update();
             anchor(pose);
             lights.show(RearStatusLed.State.DRIVE);
             boolean movedBeforeAnchor = false;
             double previous = Maths.time();
             while (opModeIsActive()) {
-                double timestamp = Maths.time();
-                double dt = Maths.clip(timestamp - previous, 0.005, 0.25);
-                previous = timestamp;
                 pose.update();
                 // Re-anchor only when the operator has returned the robot to the entered pose.
-                if (gamepad1.y && !lastY && pose.headingValid) {
-                    anchor(pose);
-                    driverYawZero = 0;
-                    movedBeforeAnchor = false;
-                    if (turret != null) turret.stop();
+                if (gamepad1.y && !lastY) {
+                    if (!imuStarted) imuStarted = pose.startImu();
+                    if (anchor(pose)) {
+                        driverYawZero = 0;
+                        movedBeforeAnchor = false;
+                        if (turret != null) turret.stop();
+                    }
                 }
                 lastY = gamepad1.y;
                 if (gamepad1.x && !lastX) {
@@ -94,6 +94,9 @@ public final class BioBuzzTeleOp extends LinearOpMode {
                 boolean field = pose.headingUsable();
                 if (gamepad1.a && !lastA && field && pose.headingValid) driverYawZero = pose.heading;
                 lastA = gamepad1.a;
+                double timestamp = Maths.time();
+                double dt = Maths.clip(timestamp - previous, 0.005, 0.25);
+                previous = timestamp;
                 if (turret != null) {
                     if (!turret.isHomed()) turret.homeAtRight();
                     turret.sample(dt);
@@ -174,12 +177,23 @@ public final class BioBuzzTeleOp extends LinearOpMode {
                 if (turret != null) {
                     String status = !turret.calibrated() ? "先运行 02 自测"
                             : !turret.encoderReady() || !turret.motorResponding() ? "读数或电机恢复中"
+                            : !field ? "等待 Pinpoint 航向，保持角度"
                             : turret.rewinding() ? "PID 回转"
+                            : !turret.targetReachable() ? "目标在行程之外，等待可达角"
                             : String.format("发射朝向 %+.1f°", Math.toDegrees(Maths.wrap(pose.heading + turret.boreRelative())));
                     telemetry.addData("云台", status);
+                    if (turret.rewinding()) {
+                        telemetry.addData("回转剩余 / 速度 / 功率", "%.1f° / %+.0f°/s / %+.2f",
+                                Math.toDegrees(turret.target - turret.angle),
+                                Math.toDegrees(turret.speed), turret.output());
+                    }
                     if (gamepad1.back) {
-                        telemetry.addData("云台行程角 / 电机功率 / 刹车", "%+.1f° / %+.2f / %+.2f",
-                                Math.toDegrees(turret.angle), turret.output(), turret.brakeDuty());
+                        showTurretCalibration(turret);
+                        telemetry.addData("云台目标 / PID 设定 / 行程角 / 速度", "%.1f° / %.1f° / %.1f° / %+.0f°/s",
+                                Math.toDegrees(turret.target), Math.toDegrees(turret.controlTarget()),
+                                Math.toDegrees(turret.angle), Math.toDegrees(turret.speed));
+                        telemetry.addData("云台功率 / 刹车 / 右限 / 左限", "%+.2f / %+.2f / %.2f / %.2f",
+                                turret.output(), turret.brakeDuty(), turret.powerLimit(-1), turret.powerLimit(1));
                     }
                     if (field && turret.calibrated() && turret.encoderReady()) {
                         telemetry.addData("云台朝向误差", "%+.1f°", Math.toDegrees(turret.worldError));
@@ -201,6 +215,20 @@ public final class BioBuzzTeleOp extends LinearOpMode {
         }
     }
 
+    private void showTurretCalibration(Turret turret) {
+        double[] gains = turret.pidGains();
+        double[] coupling = turret.coupling();
+        String pidSource = turret.usesSavedPid() ? "已保存的 05" : turret.plantIdentified() ? "02 基线" : "默认";
+        telemetry.addData("云台 PID P / I / D", "%s  %.3f / %.3f / %.3f", pidSource, gains[0], gains[1], gains[2]);
+        telemetry.addData("云台刹车模型 / 摩擦", "%s / %s", turret.plantIdentified() ? "已加载 02" : "默认",
+                turret.hasFrictionMap() ? "已加载分段表" : "方向基线");
+        telemetry.addData("云台耦合 左 / 右", "%s / %s", couplingStatus(coupling, 0), couplingStatus(coupling, 2));
+    }
+
+    private static String couplingStatus(double[] values, int side) {
+        return values[side] > 0 ? String.format("%.3f, %.3f", values[side], values[side + 1]) : "模型基线";
+    }
+
     private static RearStatusLed.State rearState(boolean fault, boolean reverse, boolean firing,
                                                  boolean noFire, boolean trigger, boolean intake, boolean aimed) {
         if (fault) return RearStatusLed.State.FAULT;
@@ -212,8 +240,8 @@ public final class BioBuzzTeleOp extends LinearOpMode {
         return aimed ? RearStatusLed.State.AIMED : RearStatusLed.State.DRIVE;
     }
 
-    private void anchor(PinpointPose pose) {
-        pose.anchor(startForward * RobotConfig.TILE_MM, startRight * RobotConfig.TILE_MM,
+    private boolean anchor(PinpointPose pose) {
+        return pose.anchor(startForward * RobotConfig.TILE_MM, startRight * RobotConfig.TILE_MM,
                 Math.toRadians(startHeading));
     }
 
