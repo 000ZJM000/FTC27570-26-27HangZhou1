@@ -5,7 +5,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 final class Measurements {
-    private final double[] values = new double[128];
+    private final double[] values = new double[256];
     private int count;
 
     void add(double value) {

@@ -58,16 +58,8 @@ final class BayesianPidSearch {
             this.score = score;
             this.firstFailure = firstFailure;
         }
-    }
 
-    static final class Selection {
-        final double[] gains;
-        final double score;
-
-        Selection(double[] gains, double score) {
-            this.gains = gains;
-            this.score = score;
-        }
+        boolean qualified() { return passed == VERIFICATION_ROUNDS && Double.isFinite(score); }
     }
 
     BayesianPidSearch(double[] max, double[] scale) {
@@ -76,6 +68,11 @@ final class BayesianPidSearch {
     }
 
     List<Review> reviews() { return new ArrayList<>(reviews); }
+    Review incumbent() { return reviews.isEmpty() ? null : reviews.get(0); }
+    Review bestCandidate() {
+        return reviews.stream().skip(1).filter(Review::qualified)
+                .min(Comparator.comparingDouble(row -> row.score)).orElse(null);
+    }
     int searchCount() { return data.size() - historyCount; }
     int historyCount() { return historyCount; }
     double bestSearchCost() {
@@ -86,7 +83,7 @@ final class BayesianPidSearch {
                 .mapToDouble(o -> o.result.cost).min().orElse(Double.NaN);
     }
 
-    Selection tune(double[] existing, Trial trial, BooleanSupplier cancelled, double[] history)
+    void tune(double[] existing, Trial trial, BooleanSupplier cancelled, double[] history)
             throws InterruptedException {
         loadHistory(history);
         double[] baseline = normalize(existing), center = baseline;
@@ -102,8 +99,8 @@ final class BayesianPidSearch {
         for (int round = 0, attempts = 0; round < MAX_ROUNDS && attempts < MAX_ROUNDS + 12
                 && !cancelled.getAsBoolean(); attempts++) {
             double[] x = round == 0 ? baseline : propose(center, radius, round % 5 == 0, cancelled);
-            if (cancelled.getAsBoolean()) return null;
-            Result score = trial.test(gains(x), false, round % 6);
+            if (cancelled.getAsBoolean()) return;
+            Result score = trial.test(round == 0 ? existing.clone() : gains(x), false, round % 6);
             if (!measured(score)) continue;
             data.add(new Observation(x, score));
             round++;
@@ -126,11 +123,11 @@ final class BayesianPidSearch {
             // Check the cost record independently of eligibility for PID selection.
             if (round >= MIN_ROUNDS && round - lastRecord >= RECORD_PATIENCE) break;
         }
-        if (cancelled.getAsBoolean() || searchCount() < MIN_ROUNDS) return null;
+        if (cancelled.getAsBoolean() || searchCount() < MIN_ROUNDS) return;
 
         List<double[]> finalists = new ArrayList<>();
         finalists.add(baseline);
-        List<Observation> ranked = new ArrayList<>(data);
+        List<Observation> ranked = new ArrayList<>(data.subList(historyCount, data.size()));
         ranked.sort(Comparator.comparingDouble(o -> o.result.cost));
         for (Observation o : ranked) {
             if (!o.result.settled || o.result.margin < 0) continue;
@@ -142,10 +139,10 @@ final class BayesianPidSearch {
         String[] firstFailure = new String[finalists.size()];
         for (int repeat = 0; repeat < VERIFICATION_ROUNDS; repeat++) {
             for (int i = 0; i < finalists.size(); i++) {
-                if (cancelled.getAsBoolean()) return null;
+                if (cancelled.getAsBoolean()) return;
                 int j = (i + repeat) % finalists.size();
                 if (firstFailure[j] != null) continue;
-                double[] candidate = gains(finalists.get(j));
+                double[] candidate = j == 0 ? existing.clone() : gains(finalists.get(j));
                 Result result = trial.test(candidate, true, repeat);
                 if (!measured(result) && !cancelled.getAsBoolean()) {
                     Result retry = trial.test(candidate, true, repeat);
@@ -162,18 +159,10 @@ final class BayesianPidSearch {
                 }
             }
         }
-        int winner = 0;
-        double verifiedBest = Double.POSITIVE_INFINITY;
         for (int i = 0; i < costs.length; i++) {
             double value = passed[i] == VERIFICATION_ROUNDS ? validationScore(costs[i]) : Double.POSITIVE_INFINITY;
-            reviews.add(new Review(gains(finalists.get(i)), passed[i], value, firstFailure[i]));
-            if (value < 0.98 * verifiedBest) {
-                verifiedBest = value;
-                winner = i;
-            }
+            reviews.add(new Review(i == 0 ? existing.clone() : gains(finalists.get(i)), passed[i], value, firstFailure[i]));
         }
-        return !cancelled.getAsBoolean() && Double.isFinite(verifiedBest)
-                ? new Selection(gains(finalists.get(winner)), verifiedBest) : null;
     }
 
     private void loadHistory(double[] history) {

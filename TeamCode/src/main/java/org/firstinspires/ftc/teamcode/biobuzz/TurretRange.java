@@ -20,7 +20,7 @@ public final class TurretRange {
 
     public void finishRewind() {
         direction = 0;
-        rewinding = predicted = false;
+        rewinding = predicted = rewindTargetMoves = false;
     }
 
     boolean rewindTargetMoves() { return rewindTargetMoves; }
@@ -28,6 +28,22 @@ public final class TurretRange {
     public double target(double bearing, double current, double relativeRate, double lookahead) {
         double equivalent = equivalent(bearing);
         reachable = equivalent <= high;
+        if (predicted) {
+            double source = direction > 0 ? low : high;
+            if (reachable && (equivalent - source) * direction > Math.PI) {
+                predicted = false;
+            } else {
+                double acrossGap = -direction * Maths.wrap(bearing - source);
+                double rateAcrossGap = -direction * relativeRate;
+                double gap = Maths.TURN - (high - low);
+                // Allow a small difference between the forecast to start and the forecast to stay active.
+                if (rateAcrossGap <= 0.20 || acrossGap + rateAcrossGap * lookahead < gap - Math.toRadians(4)) {
+                    finishRewind();
+                    previousTarget = reachable ? equivalent : source;
+                    return previousTarget;
+                }
+            }
+        }
         if (!rewinding) {
             double forecast = equivalent(bearing + relativeRate * lookahead);
             double nearCurrent = current + Maths.wrap(bearing - current);
@@ -44,7 +60,10 @@ public final class TurretRange {
             }
             // An initial acquisition or a newly selected field goal takes the normal PID path.
             if (!rewinding) {
-                previousTarget = reachable ? equivalent : Maths.clip(nearCurrent, low, high);
+                // Keep the selected edge while the field bearing is inside the gap.
+                double reference = Double.isFinite(previousTarget) ? previousTarget : current;
+                double nearReference = reference + Maths.wrap(bearing - reference);
+                previousTarget = reachable ? equivalent : Maths.clip(nearReference, low, high);
                 return previousTarget;
             }
         }

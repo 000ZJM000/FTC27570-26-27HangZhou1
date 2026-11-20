@@ -22,6 +22,7 @@ public final class Turret {
     private int homeTick, lastTick, previousGoal, trackedGoal;
     private boolean homed, encoderFresh, fieldTracking, motorResponding = true;
     private double encoderAge, goalRate, previousGoalBearing, lastPower;
+    private double stillSeconds;
     private double previousCoupledRate, coupledAcceleration, filteredStick;
     private double worldBearing = Double.NaN, localHold = Double.NaN;
     public double angle, speed, target, worldError;
@@ -29,7 +30,7 @@ public final class Turret {
     public Turret(HardwareMap map, CalibrationStore store) {
         motor = map.get(DcMotorEx.class, RobotConfig.TURRET_MOTOR);
         encoder = map.get(DcMotorEx.class, RobotConfig.TURRET_ENCODER);
-        // Standardize the reading without changing m-2's direction or resetting its encoder.
+        // Configure only the turret motor. The drive motor on the encoder port keeps its configuration.
         motor.setPower(0);
         motor.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         motor.setDirection(DcMotorSimple.Direction.FORWARD);
@@ -121,14 +122,22 @@ public final class Turret {
 
     public void sample(double dt) {
         if (!homed) return;
+        double wasStillFor = stillSeconds;
+        stillSeconds = 0;
         encoderAge += dt;
+        boolean consecutive = encoderFresh;
         encoderFresh = false;
         try {
             int ticks = rawTicks();
             double change = geometry[0] * (ticks - lastTick) / RobotConfig.TICKS_PER_TURRET_RADIAN;
             if (Math.abs(change) > Math.toRadians(6) + 40 * Math.min(0.10, encoderAge)) return;
             angle = geometry[0] * (ticks - homeTick) / RobotConfig.TICKS_PER_TURRET_RADIAN;
-            speed += encoderAge / (0.026 + encoderAge) * (change / encoderAge - speed);
+            double measuredSpeed = change / encoderAge;
+            speed += encoderAge / (0.026 + encoderAge) * (measuredSpeed - speed);
+            if (consecutive && encoderAge <= RobotConfig.SHOT_TURRET_STILL_SECONDS
+                    && Math.max(Math.abs(measuredSpeed), Math.abs(speed)) <= RobotConfig.SHOT_TURRET_STILL_RATE) {
+                stillSeconds = wasStillFor + encoderAge;
+            }
             int direction = Math.abs(speed) > 0.13 ? (speed >= 0 ? 1 : -1) : (appliedPower >= 0 ? 1 : -1);
             double drag = frictionDuty(angle, direction, speed);
             if (Math.abs(speed) < 0.13) drag = Math.min(drag, Math.abs(appliedPower));
@@ -185,7 +194,7 @@ public final class Turret {
         boolean wasRewinding = range.rewinding;
         target = range.target(stabilized + correction, angle, relativeRate, lookahead);
         worldError = Maths.wrap(worldBearing - actualBearing);
-        if (range.rewinding && !wasRewinding) {
+        if (range.rewinding != wasRewinding) {
             pid.reset();
             holding = false;
         }
@@ -201,7 +210,7 @@ public final class Turret {
         double anticipatedRate = tracking ? 0.55 * (filteredStick - stick) : 0;
         control(target, desiredRate, tracking ? rate : 0, tracking ? coupledAcceleration : 0,
                 anticipatedRate, dt);
-        if (range.rewinding && pose.headingValid && encoderReady() && motorResponding
+        if (range.rewinding && !range.predicted && pose.headingValid && encoderReady() && motorResponding
                 && Math.abs(target - angle) <= RobotConfig.SHOT_AIM_TOLERANCE
                 && Math.abs(speed - desiredRate) < 0.32) {
             range.finishRewind();
@@ -220,6 +229,11 @@ public final class Turret {
     public boolean aimReady() {
         return calibrated() && encoderReady() && motorResponding && fieldTracking && range.reachable && !range.rewinding
                 && Math.abs(worldError) <= RobotConfig.SHOT_AIM_TOLERANCE;
+    }
+
+    public boolean stableForShot() {
+        return calibrated() && encoderReady() && motorResponding
+                && stillSeconds >= RobotConfig.SHOT_TURRET_STILL_SECONDS;
     }
     public boolean rewinding() { return range.rewinding; }
     public boolean rewindPredicted() { return range.rewinding && range.predicted; }
@@ -338,6 +352,7 @@ public final class Turret {
         previousCoupledRate = coupledAcceleration = filteredStick = 0;
         range.reset();
         holding = false;
+        stillSeconds = 0;
         pid.reset();
         observer.reset(angle, speed);
     }

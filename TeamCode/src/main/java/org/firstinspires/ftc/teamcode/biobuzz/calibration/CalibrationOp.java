@@ -70,6 +70,24 @@ abstract class CalibrationOp extends LinearOpMode {
         return false;
     }
 
+    boolean choosePid(BayesianPidSearch search, BayesianPidSearch.Review candidate, Runnable display)
+            throws InterruptedException {
+        return confirm("请选择 PID。A 保存最佳新值，B 保留旧值。代价越低越好。", () -> {
+            showPidReview("旧 PID", search.incumbent());
+            showPidReview("最佳新 PID", candidate);
+            display.run();
+        });
+    }
+
+    void showPidReview(String title, BayesianPidSearch.Review row) {
+        if (row == null) return;
+        telemetry.addData(title + " P / I / D", "%.3f / %.3f / %.3f", row.gains[0], row.gains[1], row.gains[2]);
+        if (row.qualified()) telemetry.addData(title + " 复测", "%d/%d 组通过，代价 %.3f",
+                row.passed, BayesianPidSearch.VERIFICATION_ROUNDS, row.score);
+        else telemetry.addData(title + " 复测", "%d/%d 组通过，%s",
+                row.passed, BayesianPidSearch.VERIFICATION_ROUNDS, row.firstFailure);
+    }
+
     interface Tick {
         boolean step(double seconds, double dt);
     }

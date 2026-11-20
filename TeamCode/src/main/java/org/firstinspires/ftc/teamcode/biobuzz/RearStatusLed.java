@@ -11,7 +11,7 @@ public final class RearStatusLed {
     private double pendingSince, lastWrite;
 
     public enum State {
-        INIT, DRIVE, AIMED, INTAKE, REVERSE, SPINUP, NO_FIRE, FIRING,
+        INIT, DRIVE, AIMED, INTAKE, REVERSE, NO_FIRE,
         CAL_WAIT, CAL_RUNNING, CAL_DONE, FAULT, OFF
     }
 
@@ -33,22 +33,20 @@ public final class RearStatusLed {
     public void show(State state) {
         if (module == null || state == shown) return;
         pending = shown = state;
-        lastWrite = Maths.time();
         switch (state) {
             case INIT: module.setBreathMode(true, 40, 1.35, 55, 0x249BFF); break;
             case DRIVE: module.setSolidColor(0x165EFF, 45); break;
             case AIMED: module.setSolidColor(0x00E454, 72); break;
             case INTAKE: module.setWaveMode(0x02CE94, 0x067471, 44, 68); break;
             case REVERSE: module.setSolidColor(0xEA27CF, 68); break;
-            case SPINUP: module.setBreathMode(true, 50, 1.40, 78, 0xFFC437); break;
             case NO_FIRE: module.setSolidColor(0xFF7100, 74); break;
-            case FIRING: module.setSolidColor(0xF2FFFF, 100); break;
             case CAL_WAIT: module.setSolidColor(0xF0B42A, 55); break;
             case CAL_RUNNING: module.setWaveMode(0x496FFF, 0x7D30CC, 42, 70); break;
             case CAL_DONE: module.setSolidColor(0x9BEDE2, 62); break;
             case FAULT: module.setSolidColor(0xFF2312, 72); break;
             case OFF: module.turnOff(); break;
         }
+        lastWrite = Maths.time();
     }
 
     /** Called by TeleOp every loop; filters short state changes and limits the command rate. */

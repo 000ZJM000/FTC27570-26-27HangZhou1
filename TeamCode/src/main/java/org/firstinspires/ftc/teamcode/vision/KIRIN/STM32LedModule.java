@@ -25,6 +25,7 @@ package org.firstinspires.ftc.teamcode.vision.KIRIN;
 import com.qualcomm.robotcore.hardware.I2cAddr;
 import com.qualcomm.robotcore.hardware.I2cDeviceSynch;
 import com.qualcomm.robotcore.hardware.I2cDeviceSynchDevice;
+import com.qualcomm.robotcore.hardware.I2cWaitControl;
 import com.qualcomm.robotcore.hardware.configuration.annotations.DeviceProperties;
 import com.qualcomm.robotcore.hardware.configuration.annotations.I2cDeviceType;
 import com.qualcomm.robotcore.util.RobotLog;
@@ -34,7 +35,7 @@ import java.util.Locale;
 
 /**
  * <h1>STM32 Smart LED & Buzzer Module Driver (V3 Firmware)</h1>
- * <p>A high-performance, non-blocking I2C driver for the STM32-based daisy-chainable LED module.</p>
+ * <p>Sends complete I2C commands to the STM32-based daisy-chainable LED module.</p>
  * <p>Features built-in rendering engines for breathing, anti-aliased waves, and smart progress bars.</p>
  */
 @I2cDeviceType
@@ -110,7 +111,7 @@ public class STM32LedModule extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         String fullCommand = command + "&";
         byte[] payload = fullCommand.getBytes(StandardCharsets.US_ASCII);
         try {
-            this.deviceClient.write(payload);
+            this.deviceClient.write(payload, I2cWaitControl.WRITTEN);
         } catch (Exception e) {
             RobotLog.ee(TAG, "I2C Write Failed: " + fullCommand);
         }

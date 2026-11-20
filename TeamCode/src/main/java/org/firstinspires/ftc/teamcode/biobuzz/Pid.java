@@ -18,8 +18,14 @@ public final class Pid {
 
     public double update(double error, double measuredRate, double ff, double dt,
                          double minOutput, double maxOutput, boolean integrate) {
+        return update(error, measuredRate, ff, dt, minOutput, maxOutput, integrate, 0);
+    }
+
+    double update(double error, double measuredRate, double ff, double dt,
+                  double minOutput, double maxOutput, boolean integrate, double minimumIntegralGain) {
         double base = p * error - d * measuredRate + ff;
-        double trial = integrate ? Maths.clip(integral + i * error * dt, -0.20, 0.20) : integral;
+        double trial = integrate
+                ? Maths.clip(integral + Math.max(i, minimumIntegralGain) * error * dt, -0.20, 0.20) : integral;
         double requested = base + trial;
         if ((requested <= maxOutput || trial <= integral)
                 && (requested >= minOutput || trial >= integral)) {
@@ -27,6 +33,8 @@ public final class Pid {
         }
         return Maths.clip(base + integral, minOutput, maxOutput);
     }
+
+    double integralDuty() { return integral; }
 
     public void reset() { integral = 0; }
 }

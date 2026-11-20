@@ -11,11 +11,12 @@ public final class CalibrationStore {
     public static final String TURRET_PID = "turret_single_pid_bayes_v1";
     public static final String TURRET_PID_HISTORY = "turret_pid_long_step_history_v2";
     public static final String TURRET_COUPLED_DYNAMICS = "turret_chassis_state_ff_v1";
+    public static final String FLYWHEEL_DIRECTIONS = "flywheel_directions_v1";
     public static final String FLYWHEEL_SCALE = "flywheel_scale";
     public static final String FLYWHEEL_MODEL = "flywheel_model";
     public static final String FLYWHEEL_FULL_POWER_MODEL = "flywheel_model_full_power_v1";
     public static final String FLYWHEEL_PID = "flywheel_pid";
-    public static final String FLYWHEEL_PID_HISTORY = "flywheel_pid_full_power_history_v2";
+    public static final String FLYWHEEL_PID_HISTORY = "flywheel_pid_full_range_history_v5";
 
     private final SharedPreferences prefs;
 
@@ -51,6 +52,10 @@ public final class CalibrationStore {
 
     public boolean save(String key, double... values) {
         if (!Maths.finite(values)) return false;
+        if (FLYWHEEL_DIRECTIONS.equals(key)
+                && (values.length != 2 || Math.abs(values[0]) != 1 || Math.abs(values[1]) != 1)) {
+            return false;
+        }
         StringBuilder result = new StringBuilder();
         for (double value : values) {
             if (result.length() > 0) result.append(',');
@@ -72,7 +77,10 @@ public final class CalibrationStore {
             if (TURRET_PLANT.equals(key)) edit.remove(TURRET_FRICTION_MAP);
             clearTurretTuning(edit);
         }
-        if (FLYWHEEL_FULL_POWER_MODEL.equals(key) && fullPowerModelChanged(values)) {
+        if (FLYWHEEL_FULL_POWER_MODEL.equals(key)) {
+            edit.remove(FLYWHEEL_PID_HISTORY);
+        }
+        if (FLYWHEEL_DIRECTIONS.equals(key) && !Arrays.equals(values, readExact(key, 2))) {
             edit.remove(FLYWHEEL_PID_HISTORY);
         }
         if (FLYWHEEL_SCALE.equals(key) && values.length == 1
@@ -88,11 +96,4 @@ public final class CalibrationStore {
         edit.remove(TURRET_PID).remove(TURRET_PID_HISTORY).remove(TURRET_COUPLED_DYNAMICS);
     }
 
-    private boolean fullPowerModelChanged(double[] model) {
-        if (model.length != 4) return true;
-        double[] previous = read(FLYWHEEL_FULL_POWER_MODEL, 0, 0, 0, 0);
-        return Math.abs(model[0] - previous[0]) > 0.015 * model[0]
-                || Math.abs(model[3] - previous[3]) > 0.015 * model[3]
-                || Math.abs(model[1] - previous[1]) > 0.02;
-    }
 }

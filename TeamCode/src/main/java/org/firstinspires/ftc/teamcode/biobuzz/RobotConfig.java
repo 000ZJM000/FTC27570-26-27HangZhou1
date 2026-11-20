@@ -7,7 +7,7 @@ import com.qualcomm.robotcore.hardware.DcMotorSimple.Direction;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 
 public final class RobotConfig {
-    // Expansion Hub 2: m-1 (0), m-2 (1), m-7 (2), m-8 (3); SL (0), ST (1); Pinpoint I2C bus 0.
+    // Expansion Hub 2: m-1 (0), m-2 (1), m-7 (2), m-8 (3); SL (0), ST (1); Pinpoint I2C bus 1.
     // Control Hub: m-3 (0), m-4 (1), m-5 (2), m-6 (3); SB (0), SR (5); internal IMU I2C bus 0.
     public static final String[] DRIVE = {"m-1", "m-2", "m-3", "m-4"};
     public static final Direction[] DRIVE_DIRECTIONS = {
@@ -17,12 +17,12 @@ public final class RobotConfig {
     public static final Direction INTAKE_DIRECTION = Direction.REVERSE;
     public static final String TURRET_MOTOR = "m-6";
     public static final String FLYWHEEL_LEFT = "m-7", FLYWHEEL_ENCODER_MOTOR = "m-8";
-    public static final Direction FLYWHEEL_LEFT_DIRECTION = Direction.REVERSE;
-    public static final Direction FLYWHEEL_ENCODER_DIRECTION = Direction.FORWARD;
+    public static final Direction FLYWHEEL_LEFT_DIRECTION = Direction.FORWARD;
+    public static final Direction FLYWHEEL_ENCODER_DIRECTION = Direction.REVERSE;
     public static final String INTAKE_LEFT_SERVO = "SL", INTAKE_RIGHT_SERVO = "SR";
     public static final String BLOCKER_SERVO = "SB", PITCH_SERVO = "ST";
-    // Expansion Hub port 1 shares its configuration name with the left rear DRIVE MOTOR.
-    public static final String TURRET_ENCODER = "m-2";
+    // Expansion Hub encoder port 0 shares its configuration name with the left front drive motor.
+    public static final String TURRET_ENCODER = "m-1";
     public static final String PINPOINT = "pinpoint";
     public static final String REAR_STATUS_LED = "LED";
     // REV Through Bore Encoder V2 (REV-11-3174), on the shaft after the 5.2:1 gearbox.
@@ -56,17 +56,20 @@ public final class RobotConfig {
     public static final double TURRET_MAX_RATE = 10.0;
     public static final double FLYWHEEL_MAX_POWER = 1.0;
     public static final double FLYWHEEL_RAMP = 2.5;
-    public static final double FLYWHEEL_IDLE_RPM = 4000;
-    public static final double FLYWHEEL_SHOOT_RPM = 5200;
+    public static final double FLYWHEEL_TARGET_RPM = 3100;
+    public static final double FLYWHEEL_RPM_STEP = 100;
+    public static final double FLYWHEEL_TARGET_MAX_DUTY = 0.96;
     public static final double FLYWHEEL_SPEED_TOLERANCE = 0.02;
     public static final double SHOT_AIM_TOLERANCE = Math.toRadians(2.5);
-    public static final long SHOT_FEED_DELAY_MS = 300;
-    public static final double FEED_POWER = 0.8;
+    public static final double SHOT_RPM_TOLERANCE = 0.10;
+    public static final double SHOT_TURRET_STILL_RATE = 0.13;
+    public static final double SHOT_TURRET_STILL_SECONDS = 0.10;
+    public static final double FEED_POWER = 1.0;
+    public static final double FEED_POWER_PER_SECOND = 2.0;
+    public static final double INTAKE_RAISE_SETTLE_SECONDS = 0.18;
 
     // Optional measured defaults. Flywheel calibration can fill in the encoder scale on the Hub.
     public static final double FLYWHEEL_TICKS_PER_WHEEL_REV = 0;
-    public static final double GOAL_ONE_RPM = 0;
-    public static final double GOAL_TWO_RPM = 0;
 
     public static final double INTAKE_POWER = 1.0;
     public static final double INTAKE_REVERSE_POWER = 1.0;
