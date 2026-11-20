@@ -152,6 +152,11 @@ public final class Turret {
     }
 
     public void aim(PinpointPose pose, FieldTargets goal, double stick, double dt) {
+        boolean hasGoal = goal != null && goal.distanceMm >= 0.1;
+        aim(pose, hasGoal ? goal.goal : 0, hasGoal ? goal.bearing : 0, stick, dt);
+    }
+
+    void aim(PinpointPose pose, int goalNumber, double bearing, double stick, double dt) {
         if (!calibrated() || !homed) {
             stop();
             return;
@@ -177,17 +182,15 @@ public final class Turret {
 
         // Stage 1: keep the previous world bearing while the drivetrain turns.
         double stabilized = worldBearing - pose.heading + geometry[3];
-        // Stage 2: update the desired bearing from the measured position.
-        // At the exact pivot/target coincidence, retain the last defined bearing.
-        int goalNumber = goal == null || goal.distanceMm < 0.1 ? 0 : goal.goal;
+        // Stage 2: update the desired bearing when a target is defined.
         if (goalNumber != 0 && trackedGoal != goalNumber) {
             trackedGoal = goalNumber;
             range.reset();
             pid.reset();
         }
-        double correction = goalNumber == 0 ? 0 : Maths.wrap(goal.bearing - worldBearing);
+        double correction = goalNumber == 0 ? 0 : Maths.wrap(bearing - worldBearing);
         worldBearing = Maths.wrap(worldBearing + correction);
-        updateGoalRate(goal, goalNumber, dt);
+        updateGoalRate(bearing, goalNumber, dt);
         double relativeRate = goalRate - pose.yawRate;
         int toward = relativeRate >= 0 ? 1 : -1;
         double lookahead = Maths.clip(0.23 + plant.delay(toward), 0.24, 0.36);
@@ -217,13 +220,13 @@ public final class Turret {
         }
     }
 
-    private void updateGoalRate(FieldTargets goal, int goalNumber, double dt) {
+    private void updateGoalRate(double bearing, int goalNumber, double dt) {
         if (goalNumber != 0 && previousGoal == goalNumber) {
-            double rate = Maths.clip(Maths.wrap(goal.bearing - previousGoalBearing) / dt, -5, 5);
+            double rate = Maths.clip(Maths.wrap(bearing - previousGoalBearing) / dt, -5, 5);
             goalRate += dt / (0.06 + dt) * (rate - goalRate);
         } else goalRate = 0;
         previousGoal = goalNumber;
-        if (goal != null) previousGoalBearing = goal.bearing;
+        if (goalNumber != 0) previousGoalBearing = bearing;
     }
 
     public boolean aimReady() {

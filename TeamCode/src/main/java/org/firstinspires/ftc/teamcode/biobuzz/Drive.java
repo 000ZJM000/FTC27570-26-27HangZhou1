@@ -18,12 +18,20 @@ public final class Drive {
     }
 
     public double field(double forward, double left, double turn, double heading) {
+        return field(forward, left, turn, heading, 1);
+    }
+
+    double field(double forward, double left, double turn, double heading, double maxPower) {
         double c = Math.cos(heading), s = Math.sin(heading);
-        return robot(c * forward + s * left, -s * forward + c * left, turn);
+        return robot(c * forward + s * left, -s * forward + c * left, turn, maxPower);
     }
 
     // Forward, left, and counterclockwise are positive everywhere above the wheel mixer.
     public double robot(double forward, double left, double turn) {
+        return robot(forward, left, turn, 1);
+    }
+
+    double robot(double forward, double left, double turn, double maxPower) {
         double right = -left;
         double clockwise = -turn;
         double fl = forward + right + clockwise;
@@ -32,11 +40,11 @@ public final class Drive {
         double br = forward + right - clockwise;
         double scale = Math.max(1, Math.max(Math.max(Math.abs(fl), Math.abs(bl)),
                 Math.max(Math.abs(fr), Math.abs(br))));
-        motors[0].setPower(fl / scale);
-        motors[1].setPower(bl / scale);
-        motors[2].setPower(fr / scale);
-        motors[3].setPower(br / scale);
-        return turn / scale;
+        motors[0].setPower(maxPower * (fl / scale));
+        motors[1].setPower(maxPower * (bl / scale));
+        motors[2].setPower(maxPower * (fr / scale));
+        motors[3].setPower(maxPower * (br / scale));
+        return maxPower * (turn / scale);
     }
 
     public void stop() { robot(0, 0, 0); }

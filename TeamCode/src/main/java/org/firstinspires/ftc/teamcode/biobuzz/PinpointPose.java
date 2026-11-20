@@ -18,9 +18,6 @@ public final class PinpointPose {
     private static final double BULK_SCOPE_RETRY_SECONDS = 2;
     private static final double MAX_YAW_RATE = 18;
     private static final double HEADING_SLACK = Math.toRadians(1.5);
-    private static final double STILL_YAW_RATE = Math.toRadians(0.6);
-    private static final double STILL_SECONDS = 0.25;
-    private static final double STILL_POD_TICKS = 0.75 * RobotConfig.POD_TICKS_PER_MM;
     private static final double MAX_POSITION_RATE = 5000;
     private static final double POSITION_SLACK_MM = 45;
     private static final String POSITION_REANCHOR = "Pinpoint 位置需要重新对齐，回起点按 Y";
@@ -30,10 +27,7 @@ public final class PinpointPose {
     private double previousTime, previousX, previousY, lastHeadingTime = Double.NEGATIVE_INFINITY;
     private double lastHeadingSampleTime;
     private double lastYawRate, observedYaw = Double.NaN, observedYawRate = Double.NaN;
-    private boolean headingRejected, stationary;
-    private double stillSince = Double.NaN, stationaryYawOffset;
-    private int stillX, stillY;
-    private double rejectedPositionWindow = Double.POSITIVE_INFINITY;
+    private boolean headingRejected, positionRejected;
     private double nextRead, readRetryDelay = READ_RETRY_SECONDS, nextScopeRestore;
     private int rawX, rawY;
     public boolean headingValid, positionValid;
@@ -63,10 +57,7 @@ public final class PinpointPose {
             headingShift = 0;
             lastHeadingTime = Double.NEGATIVE_INFINITY;
             lastYawRate = yawRate = 0;
-            headingRejected = false;
-            stationaryYawOffset = 0;
-            clearStationary();
-            rejectedPositionWindow = Double.POSITIVE_INFINITY;
+            headingRejected = positionRejected = false;
             clearReadBackoff();
             return true;
         } catch (RuntimeException failure) {
@@ -87,29 +78,22 @@ public final class PinpointPose {
     }
 
     public void update() {
-        update(false);
-    }
-
-    public void update(boolean driveIdle) {
         headingValid = podsValid = positionValid = false;
         observedYaw = observedYawRate = Double.NaN;
+        yawRate = 0;
         if (device == null) {
             status = "找不到 " + RobotConfig.PINPOINT;
             return;
         }
         if (!started) return;
         double readStart = Maths.time();
-        if (readStart < nextRead) {
-            publishHeading();
-            return;
-        }
+        if (readStart < nextRead) return;
 
         try {
             // A Pinpoint restart can discard the custom bulk layout. Probe it infrequently.
             if (firmwareVersion >= 3 && badReadStreak >= 4 && readStart >= nextScopeRestore) {
                 nextScopeRestore = readStart + BULK_SCOPE_RETRY_SECONDS;
                 restoreBulkScope();
-                publishHeading();
                 return;
             }
             device.update();
@@ -133,18 +117,17 @@ public final class PinpointPose {
                     && state != DeviceStatus.FAULT_NO_PODS_DETECTED) {
                 status = state.name();
                 if (anchored || state == DeviceStatus.FAULT_IMU_RUNAWAY) reportFault(status);
-                publishHeading();
                 return;
             }
             if (ready) {
                 rawX = device.getEncoderX();
                 rawY = device.getEncoderY();
             }
-            updateHeading(readStart, now, ready && driveIdle);
-            publishHeading();
+            double sampleTime = readStart + 0.5 * (now - readStart);
+            updateHeading(sampleTime, now);
             if (!headingValid) return;
             status = needsAnchor ? "Pinpoint 需要重新对齐，回起点按 Y" : state.name();
-            if (ready) updatePosition(now);
+            if (ready) updatePosition(sampleTime);
             else reportFault(state.name());
         } catch (RuntimeException unavailable) {
             headingValid = podsValid = positionValid = false;
@@ -160,7 +143,6 @@ public final class PinpointPose {
         readRetryDelay = Math.min(MAX_READ_RETRY_SECONDS, 2 * readRetryDelay);
         requireAnchorAfterReadGap(now);
         reportFault(reason);
-        publishHeading();
     }
 
     private void clearReadBackoff() {
@@ -173,19 +155,17 @@ public final class PinpointPose {
         if (anchored && now - lastHeadingTime >= REANCHOR_AFTER_READ_GAP) needsAnchor = true;
     }
 
-    private void updateHeading(double readStart, double now, boolean driveIdle) {
-        observedYaw = Maths.wrap(device.getHeading(UnnormalizedAngleUnit.RADIANS));
-        observedYawRate = device.getHeadingVelocity(UnnormalizedAngleUnit.RADIANS);
-        double nextYaw = observedYaw;
-        double rate = observedYawRate;
-        double sampleTime = readStart + 0.5 * (now - readStart);
+    private void updateHeading(double sampleTime, double now) {
+        double nextYaw = device.getHeading(UnnormalizedAngleUnit.RADIANS);
+        double rate = device.getHeadingVelocity(UnnormalizedAngleUnit.RADIANS);
+        observedYaw = Maths.wrap(nextYaw);
+        observedYawRate = rate;
         double elapsed = sampleTime - lastHeadingSampleTime;
-        double delta = Maths.wrap(nextYaw - sensorYaw);
+        double delta = nextYaw - sensorYaw;
         boolean ratesValid = Maths.finite(nextYaw, rate) && Math.abs(rate) <= MAX_YAW_RATE;
-        double window = Math.min(HEADING_GRACE, elapsed);
-        // A real turn must agree with the direction and size of the measured angular rate.
-        double expected = 0.5 * (lastYawRate + rate) * window;
-        double slack = HEADING_SLACK + 0.35 * Math.abs(rate - lastYawRate) * window + 0.10 * Math.abs(expected);
+        // Both the continuous heading change and the rate integral span the same two samples.
+        double expected = 0.5 * (lastYawRate + rate) * elapsed;
+        double slack = HEADING_SLACK + 0.35 * Math.abs(rate - lastYawRate) * elapsed + 0.10 * Math.abs(expected);
         boolean inconsistent = !needsAnchor && Double.isFinite(lastHeadingTime)
                 && Math.abs(delta - expected) > slack;
         if (!ratesValid || inconsistent) {
@@ -195,7 +175,7 @@ public final class PinpointPose {
             lastJumpRate = rate;
             if (!headingRejected) {
                 RobotLog.ww("BioBuzzPinpoint", "Heading rejected: raw=%+.2f last=%+.2f delta=%+.2f gyro=%+.2f dt=%.0f ms",
-                        Math.toDegrees(nextYaw), Math.toDegrees(sensorYaw), Math.toDegrees(delta),
+                        Math.toDegrees(observedYaw), Math.toDegrees(Maths.wrap(sensorYaw)), Math.toDegrees(delta),
                         Math.toDegrees(rate), 1000 * elapsed);
             }
             headingRejected = true;
@@ -208,39 +188,18 @@ public final class PinpointPose {
         }
         if (headingRejected) recoveredHeadingJumps++;
         headingRejected = false;
-        updateStationary(driveIdle, rate, delta, now);
         sensorYaw = nextYaw;
         lastHeadingSampleTime = sampleTime;
         lastHeadingTime = now;
         lastYawRate = rate;
         headingValid = true;
-    }
-
-    private void updateStationary(boolean driveIdle, double rate, double delta, double now) {
-        if (!driveIdle || !isAnchored() || Math.abs(rate) > STILL_YAW_RATE) {
-            clearStationary();
-            return;
-        }
-        if (!Double.isFinite(stillSince) || Math.abs((long) rawX - stillX) > STILL_POD_TICKS
-                || Math.abs((long) rawY - stillY) > STILL_POD_TICKS) {
-            stillSince = now;
-            stillX = rawX;
-            stillY = rawY;
-            stationary = false;
-        }
-        if (now - stillSince >= STILL_SECONDS) {
-            // Keep the field-position transform fixed while canceling gyro drift in heading.
-            if (stationary) stationaryYawOffset = Maths.wrap(stationaryYawOffset + delta);
-            stationary = true;
+        if (!needsAnchor) {
+            heading = Maths.wrap(sensorYaw + headingShift);
+            yawRate = rate;
         }
     }
 
-    private void clearStationary() {
-        stillSince = Double.NaN;
-        stationary = false;
-    }
-
-    private void updatePosition(double now) {
+    private void updatePosition(double sampleTime) {
         localX = device.getPosX(DistanceUnit.MM);
         localY = device.getPosY(DistanceUnit.MM);
         podsValid = Maths.finite(localX, localY);
@@ -250,8 +209,9 @@ public final class PinpointPose {
             return;
         }
         // Keep measured yaw available independently of the position check.
-        double elapsed = now - previousTime;
-        double window = Math.min(POSITION_GRACE, Math.min(elapsed, rejectedPositionWindow));
+        double elapsed = sampleTime - previousTime;
+        // A valid recovery frame includes motion since the last accepted position.
+        double window = Math.min(elapsed, REANCHOR_AFTER_READ_GAP);
         double distance = Math.hypot(localX - previousX, localY - previousY);
         boolean jumped = podsValid && distance > MAX_POSITION_RATE * window + POSITION_SLACK_MM;
         if (!podsValid || jumped) {
@@ -260,20 +220,19 @@ public final class PinpointPose {
                 lastPositionJumpMm = distance;
                 lastPositionJumpSeconds = elapsed;
             }
-            // Keep the rejection threshold at its first value until a good position returns.
-            rejectedPositionWindow = window;
+            positionRejected = true;
             if (elapsed >= POSITION_GRACE) {
                 positionNeedsAnchor = true;
                 reportFault(POSITION_REANCHOR);
             } else status = jumped ? "Pinpoint 位置跳变" : "Pinpoint 位置非有限值";
             return;
         }
-        rejectedPositionWindow = Double.POSITIVE_INFINITY;
+        positionRejected = false;
         double x = localX - originX, y = localY - originY;
         double c = Math.cos(headingShift), s = Math.sin(headingShift);
         forward = fieldForward + c * x - s * y;
         left = fieldLeft + s * x + c * y;
-        copySample(now);
+        copySample(sampleTime);
         positionValid = true;
     }
 
@@ -295,14 +254,12 @@ public final class PinpointPose {
         originX = localX;
         originY = localY;
         headingShift = Maths.wrap(fieldHeading - sensorYaw);
-        stationaryYawOffset = 0;
-        clearStationary();
         heading = Maths.wrap(fieldHeading);
         yawRate = lastYawRate;
-        copySample(Maths.time());
+        copySample(lastHeadingSampleTime);
         anchored = true;
         needsAnchor = positionNeedsAnchor = false;
-        rejectedPositionWindow = Double.POSITIVE_INFINITY;
+        positionRejected = false;
         positionAnchored = positionValid = podsValid;
         if (positionValid) status = DeviceStatus.READY.name();
         return true;
@@ -313,28 +270,17 @@ public final class PinpointPose {
     public boolean requiresReanchor() { return needsAnchor || positionNeedsAnchor; }
     public int encoderX() { return rawX; }
     public int encoderY() { return rawY; }
-    public double sensorYaw() { return sensorYaw; }
+    public double sensorYaw() { return Maths.wrap(sensorYaw); }
     public double observedYaw() { return observedYaw; }
     public double observedYawRate() { return observedYawRate; }
-    public boolean stationary() { return stationary; }
     public boolean headingUsable() { return isAnchored() && Maths.time() - lastHeadingTime <= HEADING_GRACE; }
     public boolean recentlyLocated(double maxAge) {
-        return hasPositionAnchor() && !Double.isFinite(rejectedPositionWindow) && Maths.time() - previousTime <= maxAge;
+        return hasPositionAnchor() && !positionRejected && Maths.time() - previousTime <= maxAge;
     }
 
     private void reportFault(String reason) {
         status = lastFault = reason;
         faults++;
-    }
-
-    private void publishHeading() {
-        if (headingValid && !needsAnchor) {
-            yawRate = stationary ? 0 : lastYawRate;
-            heading = Maths.wrap(sensorYaw + headingShift - stationaryYawOffset);
-        } else {
-            clearStationary();
-            yawRate = 0;
-        }
     }
 
     private void copySample(double now) {

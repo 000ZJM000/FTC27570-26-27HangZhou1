@@ -3,6 +3,7 @@ package org.firstinspires.ftc.teamcode.biobuzz;
 import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver;
 import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver.EncoderDirection;
 import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver.ErrorDetectionType;
+import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver.GoBildaOdometryPods;
 import com.qualcomm.robotcore.hardware.DcMotorSimple.Direction;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 
@@ -47,8 +48,7 @@ public final class RobotConfig {
     public static final double PINPOINT_FORWARD_MM = 83.0;
     public static final double TURRET_FORWARD_MM = -48.95762;
     public static final double TURRET_RIGHT_MM = 0;
-    // goBILDA 4-Bar resolution. X must count up forward and Y must count up left.
-    public static final double POD_TICKS_PER_MM = 19.89436789;
+    // X must count up forward and Y must count up left.
     public static final EncoderDirection X_POD_DIRECTION = EncoderDirection.REVERSED;
     public static final EncoderDirection Y_POD_DIRECTION = EncoderDirection.REVERSED;
     public static final double TURRET_MARGIN = Math.toRadians(4);
@@ -84,7 +84,7 @@ public final class RobotConfig {
         device.setErrorDetectionType(version >= 3 ? ErrorDetectionType.CRC : ErrorDetectionType.LOCAL_TEST);
         device.setOffsets(-X_POD_RIGHT_MM, Y_POD_FORWARD_MM, DistanceUnit.MM);
         device.setEncoderDirections(X_POD_DIRECTION, Y_POD_DIRECTION);
-        device.setEncoderResolution(POD_TICKS_PER_MM, DistanceUnit.MM);
+        device.setEncoderResolution(GoBildaOdometryPods.goBILDA_4_BAR_POD);
         return version;
     }
 
