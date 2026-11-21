@@ -13,42 +13,38 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.IntSupplier;
 
-@TeleOp(name = "04 飞轮全套 12V补偿·前馈·PID", group = "BIOBUZZ 自测")
+@TeleOp(name = "04 飞轮校准 12V前馈·三球回速", group = "BIOBUZZ 自测")
 public final class FlywheelCalibration extends CalibrationOp {
     private static final double[] VOLTAGE_LEVELS = {3.0, 4.5, 6.0, 7.5, 9.0, 10.5, 12.0};
     private final List<String> recoveries = new ArrayList<>();
     private double curveLimit;
-    private FlywheelPidCalibration pidCalibration;
+    private String modelSummary = "沿用已有曲线";
 
     @Override String intro() {
-        return "一次完成方向、每转计数、12V 前馈曲线、空载 PID 拟合与留出复测。最后可选三球回速。";
+        return "完成方向、每转计数、7档12V前馈曲线拟合，以及可选三球实弹回速测试。";
     }
 
     @Override void calibrate() throws InterruptedException {
         Flywheel wheel = new Flywheel(hardwareMap, store, battery);
         try {
-            if (confirm("A 从手转识别开始全套校准。B 沿用已有方向、每转计数和前馈，直接重测 PID。")) {
+            if (confirm("A 从手转识别开始全套校准；B 沿用已有方向和每转计数。")) {
                 if (!calibrateDirection(wheel)) return;
                 wheel = new Flywheel(hardwareMap, store, battery);
                 if (wheel.ticksPerRev <= 0 || confirm("A 重测每转计数，B 使用当前 RPM 比例。")) {
                     if (!calibrateScale(wheel)) return;
                 }
                 wheel = new Flywheel(hardwareMap, store, battery);
-                if (!confirm("确认供弹通道为空，手已移开。A 启动七档电压扫描，结束后自动进入 PID 拟合。")) return;
+            }
+            if (confirm("确认供弹通道为空、手已移开。A 开始 7 档电压扫描（3V–12V）拟合前馈曲线；B 跳过直接进三球回速测试。")) {
                 if (!fitModel(wheel, battery)) return;
                 wheel = new Flywheel(hardwareMap, store, battery);
-            } else if (!confirm("复用已有前馈。确认供弹通道为空，手已移开。A 启动 PID 拟合。")) {
-                return;
             }
             if (!wheel.rpmCalibrated()) {
                 telemetry.log().add("缺少 RPM 比例或电压曲线。");
                 return;
             }
             curveLimit = wheel.maxTargetRpm();
-            pidCalibration = new FlywheelPidCalibration(this, wheel);
-            pidCalibration.run();
-            if (!opModeIsActive() || motionWasAborted() || wheel.faulted()) return;
-            if (wheel.hasBlocker() && confirm("可装入最多三颗球，移开手并朝向得分区。A 开始回速测试，B 结束。")) {
+            if (wheel.hasBlocker() && confirm("可装入最多三颗球，移开手并朝向得分区。A 开始三球回速实测，B 结束。")) {
                 testRecovery(wheel);
             }
         } finally {
@@ -57,8 +53,8 @@ public final class FlywheelCalibration extends CalibrationOp {
     }
 
     @Override void showResults() {
+        telemetry.addData("飞轮前馈", modelSummary);
         if (curveLimit > 0) telemetry.addData("目标上限", "%.0f RPM", curveLimit);
-        if (pidCalibration != null) pidCalibration.showResults();
         for (String recovery : recoveries) telemetry.addLine(recovery);
     }
 
@@ -156,7 +152,10 @@ public final class FlywheelCalibration extends CalibrationOp {
             telemetry.log().add("曲线拟合无效，保留旧曲线。");
             return false;
         }
-        return save(CalibrationStore.FLYWHEEL_VOLTAGE_MODEL, curve);
+        if (!save(CalibrationStore.FLYWHEEL_VOLTAGE_MODEL, curve)) return false;
+        modelSummary = String.format(java.util.Locale.ROOT,
+                "已保存 kS=%.2f V, kV=%.2f V, kQ=%.2f V", curve[1], curve[2], curve[3]);
+        return true;
     }
 
     private static double[] fitCurve(List<double[]> points, double ref, boolean quadratic) {

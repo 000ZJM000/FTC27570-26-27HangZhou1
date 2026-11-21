@@ -28,9 +28,17 @@ final class TurretPidTuning {
         double[] current = turret.pidGains();
         TurretPlant plant = TurretPlant.load(op.store);
         double[] seed = plant.pidSeed(plant.baseline());
-        BayesianPidSearch search = new BayesianPidSearch(
-                new double[]{0.65 * seed[0], 0.45 * seed[1], 0.35 * seed[2]},
-                new double[]{1.55 * seed[0], 1.75 * seed[1], 1.65 * seed[2] + 0.04},
+        double[] min = {
+                Math.min(0.55 * seed[0], 0.85 * current[0]),
+                Math.min(0.40 * seed[1], 0.85 * current[1]),
+                Math.min(0.30 * seed[2], 0.85 * current[2])
+        };
+        double[] max = {
+                Math.max(1.65 * seed[0], 1.15 * current[0]),
+                Math.max(1.85 * seed[1], 1.15 * current[1]),
+                Math.max(1.75 * seed[2] + 0.04, 1.15 * current[2] + 0.01)
+        };
+        BayesianPidSearch search = new BayesianPidSearch(min, max,
                 new double[]{seed[0], seed[1], Math.max(0.03, seed[2])});
         double[] positioningGains = drive == null ? current : seed;
         completed = search;

@@ -20,6 +20,9 @@ final class ShotMotion {
 
     ShotVectorField.Vector predict(CalibratedShotMap map, boolean rightHalf, boolean braking) {
         double tile = RobotConfig.TILE_MM;
+        if (!RobotConfig.ENABLE_MOVING_LEAD) {
+            return map.sample(right / tile, forward / tile, rightHalf);
+        }
         double range = Math.hypot(right - tile * map.goalRight(rightHalf), forward - tile * map.goalForward());
         double flight = flightTime(range);
         double delay = RobotConfig.SHOT_RELEASE_SECONDS;
@@ -27,9 +30,15 @@ final class ShotMotion {
         double vr = sin * forwardRate + cos * rightRate;
         double along = lead(vf, braking ? RobotConfig.BRAKE_FORWARD_MM_S2 : 0, delay, flight);
         double across = lead(vr, braking ? RobotConfig.BRAKE_SIDE_MM_S2 : 0, delay, flight);
-        double virtualRight = right - sin * along + cos * across + rightOrbitRate * (delay + flight);
-        double virtualForward = forward + cos * along + sin * across + forwardOrbitRate * (delay + flight);
-        return map.sample(virtualRight / tile, virtualForward / tile, rightHalf);
+        double leadRight = -sin * along + cos * across;
+        double leadForward = cos * along + sin * across;
+        double leadNorm = Math.hypot(leadRight, leadForward);
+        if (leadNorm > 450) {
+            double scale = 450 / leadNorm;
+            leadRight *= scale;
+            leadForward *= scale;
+        }
+        return map.sample((right + leadRight) / tile, (forward + leadForward) / tile, rightHalf);
     }
 
     double lineRate(double goalRightTiles, double goalForwardTiles) {

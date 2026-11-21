@@ -8,8 +8,8 @@ import org.firstinspires.ftc.teamcode.biobuzz.Turret;
 
 final class TurretYawCalibration {
     private static final int PASSES = 2;
-    private static final double[] STICKS = {0.29, 0.77};
-    private static final double[] HOLDOUT = {0.51};
+    private static final double[] STICKS = {0.29, 0.54, 0.78};
+    private static final double[] HOLDOUT = {0.42, 0.68};
     private final CalibrationOp op;
     private int trials;
 

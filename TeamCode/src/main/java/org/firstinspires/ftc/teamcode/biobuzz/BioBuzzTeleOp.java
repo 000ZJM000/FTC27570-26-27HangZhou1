@@ -76,7 +76,12 @@ public class BioBuzzTeleOp extends LinearOpMode {
                 if (shotMap != null) telemetry.addData("射击数据", shotMap.description());
                 if (shooter != null) telemetry.addData("飞轮转向 m-7 / m-8", "%s / %s",
                         shooter.leftDirection(), shooter.encoderDirection());
-                if (shooter != null && shooter.rpmCalibrated()) showFlywheelPid(shooter);
+                if (shooter != null && shooter.rpmCalibrated()) {
+                    showFlywheelPid(shooter);
+                    if (!shooter.voltageModelCalibrated()) {
+                        telemetry.addLine("<font color='#ffcc33'>飞轮仍在使用旧占空比曲线，建议重跑 04 校准 12V 前馈</font>");
+                    }
+                }
                 telemetry.update();
                 sleep(25);
             }
@@ -94,9 +99,9 @@ public class BioBuzzTeleOp extends LinearOpMode {
             right = gamepad1.dpad_right;
             up = gamepad1.dpad_up;
             down = gamepad1.dpad_down;
-            boolean lastRpmLock = gamepad1.right_stick_button;
+            boolean lastRpmLock = gamepad1.right_stick_button && !gamepad1.back;
             boolean lastYawReset = gamepad1.left_stick_button;
-            boolean lastTurretUnlock = gamepad2.right_stick_button;
+            boolean lastTurretUnlock = (gamepad1.back && gamepad1.right_stick_button) || gamepad2.right_stick_button;
             boolean rpmLockEnabled = false, turretUnlocked = false;
             double yawTrim = 0;
             double maxRpm = shooter != null ? shooter.maxTargetRpm() : 0;
@@ -163,10 +168,10 @@ public class BioBuzzTeleOp extends LinearOpMode {
                 if (turret != null) turret.sample(dt);
                 boolean reverseRequested = gamepad1.right_bumper;
                 boolean triggerHeld = triggerPressed && !reverseRequested;
-                boolean rpmLockPressed = gamepad1.right_stick_button;
+                boolean rpmLockPressed = gamepad1.right_stick_button && !gamepad1.back;
                 if (rpmLockPressed && !lastRpmLock) rpmLockEnabled = !rpmLockEnabled;
                 lastRpmLock = rpmLockPressed;
-                boolean turretUnlockPressed = gamepad2.right_stick_button;
+                boolean turretUnlockPressed = (gamepad1.back && gamepad1.right_stick_button) || gamepad2.right_stick_button;
                 if (turretUnlockPressed && !lastTurretUnlock) {
                     turretUnlocked = !turretUnlocked;
                     if (turret != null) turret.stop();
@@ -197,7 +202,7 @@ public class BioBuzzTeleOp extends LinearOpMode {
                 boolean positionForAim = pose.positionValid || pose.recentlyLocated(0.40);
                 ShotMotion motion = new ShotMotion(pose);
                 boolean modelRight = -pose.left >= FieldTargets.FIELD_TILES * RobotConfig.TILE_MM / 2;
-                ShotVectorField.Vector sample = calibratedMode && pose.positionValid && pose.headingValid && shotMap.available()
+                ShotVectorField.Vector sample = calibratedMode && field && positionForAim && shotMap.available()
                         ? motion.predict(shotMap, modelRight, f == 0 && l == 0) : null;
                 FieldTargets aim = !calibratedMode && automatic && field && positionForAim
                         ? FieldTargets.fromPose(pose.forward, pose.left, pose.heading) : null;
@@ -245,12 +250,12 @@ public class BioBuzzTeleOp extends LinearOpMode {
                     } else shooter.requestRpm(targetRpm);
                 }
                 boolean shotBlocked = reverseRequested || noFireZone || targetRpm <= 0
-                        || intake == null || turret == null || shooter == null
-                        || shooter.faulted() || !shooter.rpmCalibrated() || !shooter.hasBlocker()
-                        || turret.encoderFault() || !turret.motorResponding();
+                        || intake == null || shooter == null
+                        || shooter.faulted() || !shooter.rpmCalibrated() || !shooter.hasBlocker();
                 boolean checkShot = triggerHeld && !shotBlocked;
-                boolean turretReady = checkShot && (!shot.awaitingApproval() || turretUnlocked || !turret.calibrated()
-                        || !turret.encoderReady() || !field || !pose.positionValid
+                boolean turretReady = checkShot && (!shot.awaitingApproval() || turretUnlocked
+                        || turret == null || !turret.calibrated() || !turret.encoderReady() || !turret.motorResponding()
+                        || !field || !positionForAim
                         || turret.aimReady() || turret.stableForShot());
                 boolean speedReady = checkShot && (!rpmLockEnabled || shooter.readyForShot(shot.feeding()));
                 boolean intakeReady = intake != null && intake.readyToFeed();
@@ -264,7 +269,11 @@ public class BioBuzzTeleOp extends LinearOpMode {
                 }
                 if (dashboard != null && timestamp >= nextDashboard) {
                     nextDashboard = timestamp + 0.067;
-                    publishDashboard(dashboard, battery, turret, shooter, firing);
+                    try {
+                        publishDashboard(dashboard, battery, turret, shooter, firing, rpmLockEnabled);
+                    } catch (RuntimeException ignored) {
+                        // Dashboard failures must not disturb the robot control loop.
+                    }
                 }
                 if (triggerChanged || ((triggerPressed || gamepad1.back || driveIdle) && timestamp >= nextPoseLog)) {
                     logPose(pose, turret, driveIdle, triggerPressed, firing);
@@ -368,18 +377,19 @@ public class BioBuzzTeleOp extends LinearOpMode {
                     telemetry.addLine("LB 吸取 | RT 射击 | RB 反转 | A 无头归零 | X 切换瞄准 | Y 起点重定位");
                     telemetry.addLine(calibratedMode ? "方向键 左 / 右 微调 06 转速 −100 / +100 RPM"
                             : "方向键 左 / 右 每次 −100 / +100 RPM");
-                    telemetry.addLine("R3 锁转速 | 方向键 上 / 下 微调云台 ±0.5° | L3 微调归零 | 副手 R3 解耦云台");
+                    telemetry.addLine("R3 锁转速 | Back+R3/副手R3 解耦云台 | 方向键 上/下 云台±0.5° | L3 微调归零");
                     telemetry.update();
                 }
                 // Complete the LED transfer at the end of this loop, away from Pinpoint and the shot.
                 if (!triggerPressed && gamepad1.right_trigger <= 0.10f && !isStopRequested()) {
-                    boolean mechanismFault = drive == null || intake == null || turret == null || shooter == null
-                            || !turret.calibrated() || !turret.encoderReady() || !turret.motorResponding()
+                    boolean turretFault = !turretUnlocked && (turret == null || !turret.calibrated()
+                            || !turret.encoderReady() || !turret.motorResponding());
+                    boolean mechanismFault = drive == null || intake == null || shooter == null || turretFault
                             || shooter.faulted() || !shooter.rpmCalibrated() || !shooter.hasBlocker();
                     boolean aimed = turret != null && !turretUnlocked && turret.aimReady()
                             && (calibratedMode ? automatic && sample != null : field && aim != null);
                     lights.update(rearState(mechanismFault || !field || !positionForAim, reverseRequested,
-                            noFireZone, gamepad1.left_bumper, aimed));
+                            noFireZone, turretUnlocked, gamepad1.left_bumper, aimed, rpmLockEnabled));
                 }
                 long remaining = loop.remainingMillis(loopStart);
                 if (remaining > 0) sleep(remaining);
@@ -408,10 +418,11 @@ public class BioBuzzTeleOp extends LinearOpMode {
     }
 
     private static void publishDashboard(FtcDashboard dashboard, BatteryVoltage battery, Turret turret, Flywheel wheel,
-                                         boolean feeding) {
+                                         boolean feeding, boolean rpmLock) {
         TelemetryPacket packet = new TelemetryPacket();
         packet.put("battery_V", battery.volts());
         packet.put("feeding", feeding ? 1 : 0);
+        packet.put("rpm_lock", rpmLock ? 1 : 0);
         if (turret != null) {
             packet.put("turret_angle_deg", Math.toDegrees(turret.angle));
             packet.put("turret_target_deg", Math.toDegrees(turret.target));
@@ -426,6 +437,7 @@ public class BioBuzzTeleOp extends LinearOpMode {
             packet.put("flywheel_target_rpm", wheel.target * 60 / wheel.ticksPerRev);
             packet.put("flywheel_voltage", wheel.deliveredVolts());
             packet.put("flywheel_pid_integral_voltage", wheel.integralVolts());
+            packet.put("flywheel_boosting", wheel.boosting() ? 1 : 0);
         }
         dashboard.sendTelemetryPacket(packet);
     }
@@ -454,12 +466,15 @@ public class BioBuzzTeleOp extends LinearOpMode {
     }
 
     private static RearStatusLed.State rearState(boolean fault, boolean reverse, boolean noFire,
-                                                 boolean intake, boolean aimed) {
+                                                 boolean turretUnlocked, boolean intake, boolean aimed,
+                                                 boolean rpmLockEnabled) {
         if (fault) return RearStatusLed.State.FAULT;
         if (reverse) return RearStatusLed.State.REVERSE;
         if (noFire) return RearStatusLed.State.NO_FIRE;
+        if (turretUnlocked) return RearStatusLed.State.UNLOCKED;
         if (intake) return RearStatusLed.State.INTAKE;
-        return aimed ? RearStatusLed.State.AIMED : RearStatusLed.State.DRIVE;
+        if (!aimed) return RearStatusLed.State.DRIVE;
+        return rpmLockEnabled ? RearStatusLed.State.AIMED_LOCKED : RearStatusLed.State.AIMED;
     }
 
     private boolean anchor(PinpointPose pose) {

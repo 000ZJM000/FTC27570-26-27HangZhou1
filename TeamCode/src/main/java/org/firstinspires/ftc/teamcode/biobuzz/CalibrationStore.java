@@ -36,7 +36,6 @@ public final class CalibrationStore {
     public static final String FLYWHEEL_FULL_POWER_MODEL = "flywheel_model_full_power_v1";
     public static final String FLYWHEEL_PID = "flywheel_pid";
     public static final String FLYWHEEL_VOLTAGE_PID = "flywheel_12v_hybrid_pid_v1";
-    public static final String FLYWHEEL_VOLTAGE_PID_HISTORY = "flywheel_12v_hybrid_pid_history_v2";
 
     private static final String CALIBRATION = "calibration.json";
     private static final Object LOCK = new Object();
@@ -53,7 +52,7 @@ public final class CalibrationStore {
             data = new JSONObject();
             JSONObject values = new JSONObject();
             try {
-                data.put("version", 1).put("values", values).put("turretStale", new JSONArray());
+                data.put("version", 1).put("values", values);
                 Map<String, ?> previous = context.getSharedPreferences("biobuzz_calibration_v1", Context.MODE_PRIVATE).getAll();
                 for (Map.Entry<String, ?> entry : previous.entrySet()) {
                     if (!(entry.getValue() instanceof String)) continue;
@@ -66,6 +65,11 @@ public final class CalibrationStore {
                         // A malformed legacy entry need not discard the other calibrations.
                     }
                 }
+                Set<String> migratedStale = new LinkedHashSet<>();
+                for (String key : new String[]{TURRET_PLANT, TURRET_FRICTION_MAP, TURRET_PID, TURRET_COUPLED_DYNAMICS}) {
+                    if (values.has(key)) migratedStale.add(key);
+                }
+                data.put("turretStale", new JSONArray(migratedStale));
                 if (!new File(directory, CALIBRATION).exists()) writeJson(CALIBRATION, data);
             } catch (JSONException malformed) {
                 throw new IllegalStateException(malformed);
@@ -168,12 +172,6 @@ public final class CalibrationStore {
                 markDependents(key, values, stale);
                 stale.remove(key);
                 if (TURRET_PID.equals(key)) records.remove(TURRET_PID_STEADY_ERROR);
-                if (FLYWHEEL_VOLTAGE_PID.equals(key)) {
-                    changed.remove("flywheelPidStale");
-                } else if (flywheelBasisChanged(key, values)) {
-                    records.remove(FLYWHEEL_VOLTAGE_PID_HISTORY);
-                    if (has(FLYWHEEL_VOLTAGE_PID)) changed.put("flywheelPidStale", true);
-                }
                 if (extra != null) records.put(extra, array(extraValues));
                 records.put(key, array(values));
                 changed.put("turretStale", new JSONArray(stale));
@@ -185,14 +183,6 @@ public final class CalibrationStore {
                 return false;
             }
         }
-    }
-
-    private boolean flywheelBasisChanged(String key, double[] values) {
-        if (FLYWHEEL_SCALE.equals(key) && values.length == 1) {
-            return Math.abs(values[0] - read(FLYWHEEL_SCALE, 0)[0]) > 0.01 * values[0];
-        }
-        return (FLYWHEEL_VOLTAGE_MODEL.equals(key) || FLYWHEEL_DIRECTIONS.equals(key))
-                && !Arrays.equals(values, readExact(key, values.length));
     }
 
     private void markDependents(String key, double[] values, Set<String> stale) {
@@ -218,7 +208,6 @@ public final class CalibrationStore {
 
     public boolean has(String key) { return data.optJSONObject("values").has(key); }
     public boolean turretStale() { return !staleKeys(data).isEmpty(); }
-    public boolean flywheelPidStale() { return data.optBoolean("flywheelPidStale"); }
 
     private static Set<String> staleKeys(JSONObject document) {
         Set<String> keys = new LinkedHashSet<>();

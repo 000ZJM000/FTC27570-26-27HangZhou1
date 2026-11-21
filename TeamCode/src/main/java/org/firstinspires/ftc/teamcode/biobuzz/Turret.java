@@ -224,7 +224,8 @@ public final class Turret {
         int toward = relativeRate >= 0 ? 1 : -1;
         double lookahead = Maths.clip(0.23 + plant.delay(toward), 0.24, 0.36);
         boolean wasRewinding = range.rewinding;
-        target = range.target(stabilized + correction + goalRate * plant.delay(toward), angle, relativeRate, lookahead);
+        double lead = Maths.clip(goalRate * plant.delay(toward), -Math.toRadians(5), Math.toRadians(5));
+        target = range.target(stabilized + correction + lead, angle, relativeRate, lookahead);
         worldError = Maths.wrap(worldBearing + yawTrim - actualBearing);
         if (range.rewinding != wasRewinding) {
             pid.reset();
@@ -241,7 +242,7 @@ public final class Turret {
         filteredStick += dt / (0.11 + dt) * (stick - filteredStick);
         double anticipatedRate = tracking ? 0.55 * (filteredStick - stick) : 0;
         control(target, desiredRate, tracking ? rate : 0, tracking ? coupledAcceleration : 0,
-                anticipatedRate, dt);
+                anticipatedRate, 0, dt);
         if (range.rewinding && !range.predicted && pose.headingValid && encoderReady() && motorResponding
                 && Math.abs(target - angle) <= RobotConfig.SHOT_AIM_TOLERANCE
                 && Math.abs(speed - desiredRate) < 0.32) {
@@ -275,11 +276,15 @@ public final class Turret {
     double controlTarget() { return controlTarget; }
 
     public void control(double targetAngle, double targetRate, double dt) {
-        control(targetAngle, targetRate, 0, 0, 0, dt);
+        control(targetAngle, targetRate, 0, 0, 0, 0, dt);
+    }
+
+    public void controlWithMeasuredBreakaway(double targetAngle, double targetRate, double breakaway, double dt) {
+        control(targetAngle, targetRate, 0, 0, 0, breakaway, dt);
     }
 
     private void control(double targetAngle, double targetRate, double chassisRate, double chassisAcceleration,
-                         double anticipatedRate, double dt) {
+                         double anticipatedRate, double measuredBreakaway, double dt) {
         controlTarget = targetAngle;
         double error = targetAngle - observer.angle;
         boolean quiet = Math.abs(targetRate) < 0.075 && Math.abs(anticipatedRate) < 0.10
@@ -301,7 +306,9 @@ public final class Turret {
         double referenceKv = velocityGain(reference == 0 ? direction : (reference > 0 ? 1 : -1));
         double ks = frictionDuty(angle, direction, speed);
         double frictionScale = Maths.clip(Math.abs(demand) / 0.11, 0, 1);
-        double frictionPower = Math.copySign(ks * frictionScale, demand);
+        double breakaway = Math.abs(speed) <= 0.12 && measuredBreakaway * direction > 0
+                ? Math.abs(measuredBreakaway) : 0;
+        double frictionPower = Math.copySign(Math.max(ks * frictionScale, breakaway), demand);
         double rateError = observer.velocity - reference;
         int brakeDirection = rateError >= 0 ? 1 : -1;
         brakeDuty = encoderFresh ? TurretBrake.duty(error, rateError, frictionPower, appliedPower,
@@ -340,7 +347,7 @@ public final class Turret {
         double horizon = Maths.clip(0.5 * plant.timeConstant(direction) + plant.delay(direction), 0.08, 0.30);
         double stoppingAllowance = Math.max(0, direction * speed) * horizon;
         double usable = remaining - RobotConfig.TURRET_MARGIN - stoppingAllowance;
-        double available = Math.min(OUTPUT_LIMIT, battery.nominal(OUTPUT_LIMIT));
+        double available = battery.nominal(OUTPUT_LIMIT);
         double taper = available * Maths.clip(usable / Math.toRadians(12), 0, 1);
         // Leave enough duty to break static friction before the target tolerance.
         // Both envelopes reach zero at the same stopping boundary.

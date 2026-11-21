@@ -11,7 +11,7 @@ public final class RearStatusLed {
     private double pendingSince, lastWrite;
 
     public enum State {
-        INIT, DRIVE, AIMED, INTAKE, REVERSE, NO_FIRE,
+        INIT, DRIVE, AIMED, AIMED_LOCKED, UNLOCKED, INTAKE, REVERSE, NO_FIRE,
         CAL_WAIT, CAL_RUNNING, CAL_DONE, FAULT, OFF
     }
 
@@ -37,6 +37,8 @@ public final class RearStatusLed {
             case INIT: module.setBreathMode(true, 40, 1.35, 55, 0x249BFF); break;
             case DRIVE: module.setSolidColor(0x165EFF, 45); break;
             case AIMED: module.setSolidColor(0x00E454, 72); break;
+            case AIMED_LOCKED: module.setSolidColor(0x00E5FF, 72); break;
+            case UNLOCKED: module.setSolidColor(0xFFD000, 68); break;
             case INTAKE: module.setWaveMode(0x02CE94, 0x067471, 44, 68); break;
             case REVERSE: module.setSolidColor(0xEA27CF, 68); break;
             case NO_FIRE: module.setSolidColor(0xFF7100, 74); break;

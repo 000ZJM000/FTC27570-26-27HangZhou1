@@ -20,7 +20,7 @@ final class CouplingFit {
     int size() { return windows.size(); }
 
     double[] fit() {
-        if (windows.size() < 18) return null;
+        if (windows.size() < 12) return null;
         double[] speeds = windows.stream().mapToDouble(row -> row[0]).sorted().toArray();
         if (speeds[speeds.length * 9 / 10] - speeds[speeds.length / 10] < 0.40) return null;
         double[] weights = new double[windows.size()];

@@ -176,8 +176,10 @@ final class TurretFrictionCalibration {
             model[side] = plant.kV(direction);
             for (int sector = 0; sector < TurretFriction.SECTORS; sector++) {
                 int index = TurretFriction.index(sector, direction);
-                model[index] = interpolate(start[side], sector);
-                model[index + 1] = interpolate(moving[side], sector);
+                double staticDuty = interpolate(start[side], sector);
+                double kineticDuty = Math.min(staticDuty, interpolate(moving[side], sector));
+                model[index] = staticDuty;
+                model[index + 1] = kineticDuty;
             }
         }
         RobotLog.ii("BioBuzzCalibration", "Friction coverage %s", coverage);
@@ -219,7 +221,7 @@ final class TurretFrictionCalibration {
                 reset();
                 return;
             }
-            if (Math.max(high, speed) - Math.min(low, speed) > Math.max(0.075, 0.18 * speed)) reset();
+            if (Math.max(high, speed) - Math.min(low, speed) > Math.max(0.10, 0.24 * speed)) reset();
             low = Math.min(low, speed);
             high = Math.max(high, speed);
             time += dt;
@@ -232,6 +234,6 @@ final class TurretFrictionCalibration {
             high = Double.NEGATIVE_INFINITY;
         }
 
-        boolean ready() { return time >= 0.16; }
+        boolean ready() { return time >= 0.12; }
     }
 }

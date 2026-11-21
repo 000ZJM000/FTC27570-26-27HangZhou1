@@ -4,7 +4,7 @@ FTC 27570 在 2026–2027 BIOBUZZ 赛季使用的机器人控制程序。项目�
 
 - **比赛主控** · Driver Station → TeleOp → **BIOBUZZ 360 云台 + 无头**
 - **标定地图跑打** · Driver Station → TeleOp → **BIOBUZZ → Biobuzz角落出发**
-- **硬件自测** · Driver Station → TeleOp → **BIOBUZZ 自测**，首次运行 **02 云台全套 → 04 飞轮全套**
+- **硬件自测** · Driver Station → TeleOp → **BIOBUZZ 自测**，首次运行 **02 云台全套 → 04 飞轮校准**
 - **射击标定与查看** · 完成硬件自测后运行 **06 半场射击校准**，通过 **07 校准数据查看** 浏览记录
 - **定位诊断** · Driver Station → TeleOp → **BIOBUZZ 诊断 → goBILDA Pinpoint Example**
 - **离线拟合** · 下载完整仓库后，在浏览器打开 [射击拟合工作台/index.html](射击拟合工作台/index.html)
@@ -53,15 +53,15 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | 用途 | Driver Station 名称 | 自测内容 |
 | --- | --- | --- |
 | 云台全套 | **02 云台全套 12V补偿·联动·PID** | 行程与方向、动力学、六点双向静／动摩擦、底盘联动、PID 与回转验收 |
-| 飞轮全套 | **04 飞轮全套 12V补偿·前馈·PID** | 转向与每转计数、七档空载电压前馈、稳速预热、PID 拟合与留出复测，可选三球回速 |
+| 飞轮校准 | **04 飞轮校准 12V前馈·三球回速** | 转向与每转计数、七档空载电压前馈拟合，可选三球实弹回速 |
 | 单项复测 | **03 云台专项 12V联动补偿** | 使用现有行程与动力学，单独重测底盘联动 |
 | 快检或重调 | **05 云台专项 12V PID·回转** | 使用现有行程与摩擦，单独运行 30 秒快检或完整 PID 拟合 |
 
-首次校准运行 **02 → 04**。02 在同一个 OpMode 中连续执行自动阶段，轮子落地并确认后才开始底盘联动与回转。04 空载曲线测完后自动进入 PID 拟合，候选通过两组留出复测后可保存。比赛使用标称 12 V 前馈和 PID 稳速，明显掉速时用 Bang-Bang 补电。
+首次校准运行 **02 → 04**。02 可在已有有效标定基础上，分阶段选择重测或沿用动力学、摩擦表、底盘联动和云台 PID。执行联动与回转前按提示让轮子落地、腾出旋转空间。04 按提示识别飞轮方向、测每转计数并扫描七档 3–12 V 前馈，之后可进行三球回速测试。
 
-02 从静止缓升电压测起转阈值，再用独立匀速行程测动摩擦。定位卡住时会短脉冲恢复，并换偏置角补测。结果分别显示静摩擦、动摩擦的左右有效点数，各类各方向至少取得 2 个有效点后才插值更新摩擦表。覆盖不足时沿用旧表，反馈正常时继续后续联动与 PID 校准。
+02 从静止缓升电压测起转阈值，再用独立匀速行程测动摩擦。定位无进展时沿目标方向缓升电压重测起转，受行程和安全电压限制。未检测到起转的位置按缺测处理，可换偏置角补测。结果分别显示静摩擦、动摩擦的左右有效点数。覆盖不足时沿用旧表，反馈正常时继续后续联动与 PID 校准。
 
-04 在预热和每个 PID 阶跃起点等待连续 **0.55 秒** 稳速，每个起始档最多等待 **12 秒**。预热未稳定时，按负载下的电池电压降低目标并换基线 PID 重试。未稳速的阶跃判为失败，两个预热档都失败时保留进入自测时的 PID。新版稳速判据使用独立的 v2 搜索历史，已保存的 PID 参数继续保留。
+飞轮调速使用 12 V 前馈、固定轻量 PI 和带滞回的 Bang-Bang 补电，默认 P/I/D 为 **1.6 / 0.30 / 0**。冷启动软起动约 **400 ms**，工作段掉速超过 **120 RPM** 时满功率补电，偏差回到 **50 RPM** 内结束补电。超速超过 **180 RPM** 时空转滑行。INIT 若提示使用旧占空比曲线，可运行 04 重测 12 V 前馈。
 
 飞轮开环扫描的低压起转阶段单独处理失转计时。编码器长时间无运动或读取异常时，`BioBuzzFlywheel` 日志记录故障，失转记录包含实际输出电压、电池电压和目标 RPM。
 
@@ -130,7 +130,8 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | 右摇杆横向 | 旋转底盘 |
 | 方向键左 / 右 | 当前飞轮目标每按一次减 / 加 100 RPM |
 | 方向键上 / 下 | 云台零位每按一次加 / 减 0.5° |
-| R3 / L3 | 切换转速锁 / 清零云台微调 |
+| R3（未按 Back）/ L3 | 切换转速锁 / 清零云台微调 |
+| Back + R3 | 切换云台解耦 |
 | LB | 放下吸取机构并吸取，松开后抬起 |
 | RT | 请求供弹和射击，松开后关闭挡弹舵机 |
 | RB | 反转清料，同时关闭挡弹舵机。反转优先于射击和吸取 |
@@ -139,7 +140,9 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | Y | 将机器人放回 INIT 输入的起点和朝向后，重新对齐场地坐标 |
 | Back（按住） | 查看 Pinpoint、云台和飞轮诊断，含实际加载的 PID |
 
-手柄 2 的 R3 切换云台解耦模式。解耦时云台电机停止输出，RT 跳过角度判定。
+手柄 2 的 R3 也可切换云台解耦。解耦时云台电机停止输出，RT 跳过角度等待。云台未配置、未标定、反馈不可用，或场地航向及最近位置不可用时，也会跳过角度等待。供弹仍受禁射、目标转速、飞轮与供弹机构状态限制。
+
+尾灯绿色表示已对准，青色表示已对准且开启转速锁，黄色表示云台解耦。
 
 ### Pinpoint 诊断
 
@@ -151,14 +154,14 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 
 - 普通主控默认自动瞄准。场地右坐标小于 3 格时瞄准 **右 2、前 2.5**，到达 3 格时切换到 **右 4、前 2.5**。**X** 切换自动瞄准与锁定方向。
 - 禁射区按机器人麦轮中心判断，范围为 **右 2–4 格、前 2.5–3.5 格**，包含边界。区内云台继续瞄准，供弹暂停，挡弹舵机保持关闭。
-- 普通主控的飞轮默认目标为 **3100 RPM**，目标设为 **0 RPM** 时停转。开机为高速直射。云台达到 PID 校准给出的角度阈值，或连续 **100 ms** 低于约 **7.45°/s**，即可通过本轮 RT 的角度判定。供弹直接升到 1.00，吸取舵机刚抬起时先等待 180 ms。已放行的一轮 RT 被禁射区、反转或硬件故障中断后，松开再按以重新检查。
+- 普通主控的飞轮默认目标为 **3100 RPM**，目标设为 **0 RPM** 时停转。开机为高速直射。云台达到 PID 校准给出的角度阈值，或连续 **100 ms** 低于约 **7.45°/s**，即可通过本轮 RT 的角度判定。供弹直接升到 1.00，吸取舵机刚抬起时先等待 180 ms。已放行的一轮 RT 被禁射区、反转或飞轮／供弹故障中断后，松开再按以重新检查。
 - 开启转速锁时，在目标的 **−8% 至 +12%** 入闸，连续供弹期间低于目标 **82%** 暂停。电池低于 **10.2 V** 时，底盘输出上限降低到 **80%**，Driver Station 顶部显示低压提示。
 
 ### Biobuzz角落出发
 
 该模式把两半场测点换算到同一个基准半场，拟合等效得分点、射向残差及距离与 RPM 的关系。INIT 显示模型来源。起点录入与驾驶按键沿用普通主控。
 
-移动瞄准预测 80 ms 机构延迟内的位移及球飞行期间继承的底盘速度。松开平移摇杆时按前向和侧向减速度预测刹停，速度过零后截断。高速直射时飞轮持续跟随当前目标，缺少可用的 06 数据时用默认转速加微调。禁射区内，或开启转速锁且松开 RT 时，飞轮保持至多 **2500 RPM**。按住 RT 跑打时四轮输出上限初设为 **75%**。
+当前 `RobotConfig.ENABLE_MOVING_LEAD = false`，角落模式按云台转轴的当前位置查询射击地图。启用该开关后，按机构延迟、飞行时间估计与刹停模型计算平移提前量，上限为 **450 mm**。高速直射时飞轮持续跟随当前目标，缺少可用的 06 数据时用默认转速加微调。禁射区内，或开启转速锁且松开 RT 时，飞轮保持至多 **2500 RPM**。按住 RT 跑打时四轮输出上限初设为 **75%**。
 
 禁射矩形同为右 2–4 格、前 2.5–3.5 格，该模式按实际航向投影车身四角，定位有效且整车四角都在矩形内时禁射。
 
@@ -175,11 +178,11 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | [PinpointPose.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/PinpointPose.java) | Pinpoint 读数校验、场地坐标对齐和定位异常处理 |
 | [SensorGoBildaPinpointExample.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/SensorGoBildaPinpointExample.java) | 车头模式驾驶、Pinpoint 原始读数与异常日志诊断 |
 | [FieldTargets.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/FieldTargets.java) | 场地得分点与禁射区 |
-| [Flywheel.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/Flywheel.java) | 飞轮测速、转速 PID 和挡弹舵机 |
+| [Flywheel.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/Flywheel.java) | 飞轮测速、12 V 前馈、轻 PI、Bang-Bang 补电和挡弹控制 |
 | [Turret.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/Turret.java) | 云台角度、回转控制与瞄准状态 |
 | [ShotVectorField.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/ShotVectorField.java) / [CalibratedShotMap.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/CalibratedShotMap.java) | 格心、四角与旧精测存储，机器人运行时射击地图 |
 | [ShotFieldCalibration.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration/ShotFieldCalibration.java) / [ShotFieldDataView.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration/ShotFieldDataView.java) | 06 打点标定和 07 数据查看 |
-| [FlywheelPidCalibration.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration/FlywheelPidCalibration.java) / [TurretPidTuning.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration/TurretPidTuning.java) | 全套校准中的 PID 搜索与留出复测 |
+| [TurretPidTuning.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration/TurretPidTuning.java) | 云台 10–16 个有效轮的 PID 搜索、留出复测与回转验收 |
 | [calibration/](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration) | 自测 OpMode、模型拟合与 PID 参数搜索 |
 | [射击拟合工作台/](射击拟合工作台) | 离线数据导入、拟合、可视化和 JSON / CSV 导出 |
 | [FtcRobotController/](FtcRobotController) | FIRST SDK 的 Robot Controller 基础工程与示例 |

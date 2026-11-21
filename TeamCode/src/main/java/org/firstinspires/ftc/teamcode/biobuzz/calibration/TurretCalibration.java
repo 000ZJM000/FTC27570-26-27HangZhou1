@@ -40,22 +40,37 @@ public final class TurretCalibration extends CalibrationOp {
                 return;
             }
             turret.homeAtRight(homeTick);
-            if (!center(turret)) return;
-            while (!new TurretQuickIdentification(this, turret).run()) {
-                plant = "未通过，保留上次值";
-                if (!opModeIsActive() || motionAborted()
-                        || !confirm("12V 动力学未通过。A 回中后重试，B 结束。") || !center(turret)) return;
+            if (!turret.plantIdentified() || confirm("A 重测 12V 动力学与刹车模型，B 沿用已有动力学。")) {
+                if (!center(turret)) return;
+                while (!new TurretQuickIdentification(this, turret).run()) {
+                    plant = "未通过，保留上次值";
+                    if (!opModeIsActive() || motionAborted()
+                            || !confirm("12V 动力学未通过。A 回中后重试，B 结束。") || !center(turret)) return;
+                }
+                plant = "已保存";
+            } else {
+                plant = "沿用已保存";
             }
-            plant = "已保存";
-            TurretFrictionCalibration measurement = new TurretFrictionCalibration(this);
-            friction = measurement.run(turret);
-            if (!opModeIsActive() || motionAborted() || measurement.feedbackLost()) return;
+            if (!turret.hasFrictionMap() || confirm("A 重测六点静/动摩擦表，B 沿用已有摩擦表。")) {
+                TurretFrictionCalibration measurement = new TurretFrictionCalibration(this);
+                friction = measurement.run(turret);
+                if (!opModeIsActive() || motionAborted() || measurement.feedbackLost()) return;
+            } else {
+                friction = "沿用已保存";
+            }
 
             turret = new Turret(hardwareMap, store, battery);
             turret.homeAtRight(homeTick);
             turret.teachingMode(false);
             if (!turret.encoderReady() || !turret.motorResponding()) return;
-            if (!confirm("轮子落地、清空周围并保持底盘静止。A 开始联动、PID 与回转，流程会自动前进。")) return;
+            if (!confirm("轮子落地、清空周围并保持底盘静止。A 进入联动与 PID 流程，B 结束并保留当前参数。")) return;
+            boolean runCoupling = confirm("A 运行底盘双向联动补偿，B 跳过联动直接进 PID 选项。");
+            boolean runPid = confirm("A 运行云台 PID 搜索与双向回转验收，B 跳过 PID。");
+            if (!runCoupling && !runPid) {
+                coupling = "沿用已保存";
+                pid = "沿用已保存";
+                return;
+            }
             PinpointPose pose = new PinpointPose(hardwareMap, battery);
             if (!initializePinpoint(pose)) {
                 coupling = "Pinpoint 航向未就绪";
@@ -63,15 +78,23 @@ public final class TurretCalibration extends CalibrationOp {
             }
             Drive drive = new Drive(hardwareMap);
             try {
-                double[] startingGains = turret.pidGains();
-                TurretPlant model = TurretPlant.load(store);
-                turret.setPidGains(model.pidSeed(model.baseline()));
-                coupling = new TurretYawCalibration(this).run(drive, pose, turret)
-                        ? "双向验收并保存" : "未通过，沿用上次值";
-                if (!opModeIsActive() || motionAborted() || !turret.motorResponding()) return;
-                turret.setPidGains(startingGains);
-                tuning = new TurretPidTuning(this);
-                pid = tuning.tune(turret, drive, pose) ? "已验收并保存" : "未验收，沿用上次值";
+                if (runCoupling) {
+                    double[] startingGains = turret.pidGains();
+                    TurretPlant model = TurretPlant.load(store);
+                    turret.setPidGains(model.pidSeed(model.baseline()));
+                    coupling = new TurretYawCalibration(this).run(drive, pose, turret)
+                            ? "双向验收并保存" : "未通过，沿用上次值";
+                    if (!opModeIsActive() || motionAborted() || !turret.motorResponding()) return;
+                    turret.setPidGains(startingGains);
+                } else {
+                    coupling = "沿用已保存";
+                }
+                if (runPid) {
+                    tuning = new TurretPidTuning(this);
+                    pid = tuning.tune(turret, drive, pose) ? "已验收并保存" : "未验收，沿用上次值";
+                } else {
+                    pid = "沿用已保存";
+                }
             } finally {
                 drive.stop();
             }

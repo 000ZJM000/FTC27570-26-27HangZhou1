@@ -30,7 +30,7 @@ public final class TurretPidCalibration extends CalibrationOp {
             tuning = new TurretPidTuning(this);
             if (confirm("轮子落地并清空周围。A 运行 30 秒快检（含底盘双向回转），B 进入完整搜索选项。")) {
                 tuning.quickCheck(turret);
-            } else if (confirm("清空云台周围。A 开始 8–12 轮搜索及留出复测，B 结束。")) {
+            } else if (confirm("清空云台周围。A 开始 10–16 轮搜索及留出复测，B 结束。")) {
                 tuning.tune(turret, null, null);
             }
         } finally {

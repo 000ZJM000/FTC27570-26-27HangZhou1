@@ -11,12 +11,11 @@ import java.util.function.BooleanSupplier;
 
 /** Constrained Bayesian search using separate Gaussian processes for score and overshoot margin. */
 final class BayesianPidSearch {
-    static final int MIN_ROUNDS = 8, MAX_ROUNDS = 12;
+    static final int MIN_ROUNDS = 10, MAX_ROUNDS = 16;
     static final int HISTORY_STRIDE = 6, HISTORY_ROWS = 40;
     static final int VERIFICATION_ROUNDS = 2;
-    private static final int RECORD_PATIENCE = 4;
+    private static final int FINALISTS = 3, RECORD_PATIENCE = 5;
     private final double[] min, max, scale;
-    private final int finalistsLimit;
     private final Random random = new Random(27270);
     private final List<Observation> data = new ArrayList<>();
     private final List<Review> reviews = new ArrayList<>();
@@ -70,14 +69,9 @@ final class BayesianPidSearch {
     }
 
     BayesianPidSearch(double[] min, double[] max, double[] scale) {
-        this(min, max, scale, 2);
-    }
-
-    BayesianPidSearch(double[] min, double[] max, double[] scale, int finalistsLimit) {
         this.min = min.clone();
         this.max = max.clone();
         this.scale = scale.clone();
-        this.finalistsLimit = finalistsLimit;
     }
 
     List<Review> reviews() { return new ArrayList<>(reviews); }
@@ -102,7 +96,6 @@ final class BayesianPidSearch {
         double[] baseline = normalize(existing), center = baseline;
         double radius = 0.30, best = Double.POSITIVE_INFINITY, record = Double.POSITIVE_INFINITY;
         for (Observation row : data) {
-            record = Math.min(record, row.result.cost);
             if (row.result.settled && row.result.margin >= 0 && row.result.cost < best) {
                 best = row.result.cost;
                 center = row.x;
@@ -110,7 +103,7 @@ final class BayesianPidSearch {
         }
         int success = 0, stagnant = 0, lastRecord = 0;
         boolean resample = false;
-        for (int round = 0, attempts = 0; round < MAX_ROUNDS && attempts < MAX_ROUNDS
+        for (int round = 0, attempts = 0; round < MAX_ROUNDS && attempts < MAX_ROUNDS + 12
                 && !cancelled.getAsBoolean(); attempts++) {
             double[] x = attempts == 0 ? baseline : resample ? sample(center, radius)
                     : propose(center, radius, attempts % 5 == 0, cancelled);
@@ -120,11 +113,11 @@ final class BayesianPidSearch {
             if (resample) continue;
             data.add(new Observation(x, score));
             round++;
-            if (score.cost < record) {
+            if (score.settled && score.margin >= 0 && score.cost < record) {
                 record = score.cost;
                 lastRecord = round;
             }
-            if (score.margin >= 0 && score.cost < best - 0.015) {
+            if (score.settled && score.margin >= 0 && score.cost < best - 0.015) {
                 best = score.cost;
                 center = x;
                 stagnant = 0;
@@ -136,8 +129,7 @@ final class BayesianPidSearch {
                 radius = radius < 0.13 ? 0.32 : radius * 0.65;
                 stagnant = success = 0;
             }
-            // Check the cost record independently of eligibility for PID selection.
-            if (round >= MIN_ROUNDS && round - lastRecord >= RECORD_PATIENCE) break;
+            if (round >= MIN_ROUNDS && Double.isFinite(record) && round - lastRecord >= RECORD_PATIENCE) break;
         }
         if (cancelled.getAsBoolean() || searchCount() < MIN_ROUNDS) return;
 
@@ -148,7 +140,7 @@ final class BayesianPidSearch {
         for (Observation o : ranked) {
             if (!o.result.settled || o.result.margin < 0) continue;
             if (finalists.stream().noneMatch(x -> distance(x, o.x) <= 0.035)) finalists.add(o.x);
-            if (finalists.size() == finalistsLimit) break;
+            if (finalists.size() == FINALISTS) break;
         }
         double[][] costs = new double[finalists.size()][VERIFICATION_ROUNDS];
         double[] steadyErrors = new double[finalists.size()];

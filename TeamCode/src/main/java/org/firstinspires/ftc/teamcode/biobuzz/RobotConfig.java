@@ -48,9 +48,10 @@ public final class RobotConfig {
     public static final double PINPOINT_FORWARD_MM = 83.0;
     public static final double TURRET_FORWARD_MM = -48.95762;
     public static final double TURRET_RIGHT_MM = 0;
+    public static final boolean ENABLE_MOVING_LEAD = false;
     public static final double SHOT_RELEASE_SECONDS = 0.080;
-    public static final double FLIGHT_NEAR_MM = 1000, FLIGHT_NEAR_SECONDS = 0.50;
-    public static final double FLIGHT_FAR_MM = 3500, FLIGHT_FAR_SECONDS = 0.90;
+    public static final double FLIGHT_NEAR_MM = 1000, FLIGHT_NEAR_SECONDS = 0.16;
+    public static final double FLIGHT_FAR_MM = 3500, FLIGHT_FAR_SECONDS = 0.42;
     public static final double BRAKE_FORWARD_MM_S2 = 2800;
     public static final double BRAKE_SIDE_MM_S2 = 2000;
     // X must count up forward and Y must count up left.
