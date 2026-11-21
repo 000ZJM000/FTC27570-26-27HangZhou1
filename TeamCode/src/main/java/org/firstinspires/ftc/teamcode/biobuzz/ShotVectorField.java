@@ -12,7 +12,6 @@ public final class ShotVectorField {
     private static final double REFINE_STEP_TILES = 0.25;
     private static final double CLEARANCE_MM = 20;
     private static final double MIN_SPACING_TILES = 20 / RobotConfig.TILE_MM;
-    private static final double SAMPLE_RADIUS_SQUARED = 1.0;
     private final CalibrationStore store;
     private final String key, refinementKey;
     private final int firstColumn;
@@ -169,33 +168,12 @@ public final class ShotVectorField {
         return true;
     }
 
-    /** Looks up a shot at a field position expressed in tiles. */
-    public Vector sample(double right, double forward) {
+    /** Shooting permission is independent of the interpolation used for aiming. */
+    boolean allowsShot(double right, double forward) {
         if (!Maths.finite(right, forward) || right < firstColumn || right >= firstColumn + COLUMNS
-                || forward < 0 || forward >= ROWS) return null;
+                || forward < 0 || forward >= ROWS) return false;
         int column = (int) right - firstColumn, row = (int) forward;
-        if (!measured(column, row) || nearUnreachableRefinement(column, row, right, forward)) return null;
-
-        Blend blend = new Blend();
-        for (int r = Math.max(0, row - 1); r <= Math.min(ROWS - 1, row + 1); r++) {
-            for (int c = Math.max(0, column - 1); c <= Math.min(COLUMNS - 1, column + 1); c++) {
-                if (r != row && c != column && (!measured(column, r) || !measured(c, row))) continue;
-                Vector center = at(c, r);
-                if (center == null) continue;
-                if (blend.add(center, squaredDistance(right, forward, centerRightTiles(c), centerForwardTiles(r)))) {
-                    return center;
-                }
-                int first = (r * COLUMNS + c) * REFINEMENTS_PER_CELL;
-                for (int i = first; i < first + REFINEMENTS_PER_CELL; i++) {
-                    Refinement point = refinements[i];
-                    if (point == null) continue;
-                    Vector shot = at(point);
-                    if (shot != null && blend.add(shot,
-                            squaredDistance(right, forward, point.rightTiles, point.forwardTiles))) return shot;
-                }
-            }
-        }
-        return blend.result();
+        return measured(column, row) && !nearUnreachableRefinement(column, row, right, forward);
     }
 
     private boolean nearUnreachableRefinement(int column, int row, double right, double forward) {
@@ -232,28 +210,6 @@ public final class ShotVectorField {
 
     private static Vector vector(double forward, double right) {
         return forward == 0 && right == 0 ? null : new Vector(forward, right);
-    }
-
-    private static final class Blend {
-        private double forward, right, rpm, weightSum;
-
-        boolean add(Vector shot, double distanceSquared) {
-            if (distanceSquared < 1e-12) return true;
-            if (distanceSquared >= SAMPLE_RADIUS_SQUARED) return false;
-            double taper = 1 / distanceSquared - 1 / SAMPLE_RADIUS_SQUARED;
-            double weight = taper * taper;
-            double speed = shot.rpm();
-            forward += weight * shot.forward / speed;
-            right += weight * shot.right / speed;
-            rpm += weight * speed;
-            weightSum += weight;
-            return false;
-        }
-
-        Vector result() {
-            if (weightSum == 0 || Math.hypot(forward, right) < 0.05 * weightSum) return null;
-            return Vector.fromShot(Math.atan2(-right, forward), rpm / weightSum);
-        }
     }
 
     private static int offset(int column, int row) {

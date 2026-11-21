@@ -74,8 +74,10 @@ public final class Flywheel {
     }
     public boolean faulted() { return fault; }
     public boolean readyForShot() {
-        double tolerance = target * RobotConfig.SHOT_RPM_TOLERANCE;
-        return !fault && target > 0 && speed >= target - tolerance && speed <= target + tolerance;
+        return readyForShot(RobotConfig.SHOT_RPM_TOLERANCE);
+    }
+    boolean readyForShot(double relativeTolerance) {
+        return !fault && target > 0 && Math.abs(speed - target) <= target * relativeTolerance;
     }
     public boolean hasBlocker() { return blocker != null; }
     public boolean usesSavedPid() { return savedPid; }
@@ -120,12 +122,21 @@ public final class Flywheel {
         regulate(Maths.clip(rpm, 0, maxTargetRpm()) * ticksPerRev / 60);
     }
 
+    void trackRpm(double rpm) {
+        regulate(Maths.clip(rpm, 0, maxTargetRpm()) * ticksPerRev / 60, true);
+    }
+
     public void regulate(double ticksPerSecond) {
+        regulate(ticksPerSecond, false);
+    }
+
+    private void regulate(double ticksPerSecond, boolean tracking) {
         if (fault || !calibrated() || !Double.isFinite(ticksPerSecond) || ticksPerSecond <= 0) {
             stop();
             return;
         }
-        if (target != ticksPerSecond) {
+        double allowedChange = tracking ? 0.10 * target : 0;
+        if (Math.abs(target - ticksPerSecond) > allowedChange) {
             pid.reset();
         }
         target = ticksPerSecond;

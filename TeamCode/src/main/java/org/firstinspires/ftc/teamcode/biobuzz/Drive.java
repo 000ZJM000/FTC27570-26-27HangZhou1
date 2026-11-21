@@ -38,13 +38,13 @@ public final class Drive {
         double bl = forward - right + clockwise;
         double fr = forward - right - clockwise;
         double br = forward + right - clockwise;
-        double scale = Math.max(1, Math.max(Math.max(Math.abs(fl), Math.abs(bl)),
-                Math.max(Math.abs(fr), Math.abs(br))));
-        motors[0].setPower(maxPower * (fl / scale));
-        motors[1].setPower(maxPower * (bl / scale));
-        motors[2].setPower(maxPower * (fr / scale));
-        motors[3].setPower(maxPower * (br / scale));
-        return maxPower * (turn / scale);
+        double peak = Math.max(Math.max(Math.abs(fl), Math.abs(bl)), Math.max(Math.abs(fr), Math.abs(br)));
+        double scale = Math.max(1, peak / maxPower);
+        motors[0].setPower(fl / scale);
+        motors[1].setPower(bl / scale);
+        motors[2].setPower(fr / scale);
+        motors[3].setPower(br / scale);
+        return turn / scale;
     }
 
     public void stop() { robot(0, 0, 0); }

@@ -33,4 +33,21 @@ public final class FieldTargets {
         return right >= LEFT_GOAL_RIGHT && right <= RIGHT_GOAL_RIGHT
                 && forward >= GOAL_FORWARD && forward <= FIELD_TILES - GOAL_FORWARD;
     }
+
+    static boolean fullyInNoFireZone(double forwardMm, double leftMm, double heading) {
+        double cos = Math.cos(heading), sin = Math.sin(heading);
+        double halfLength = RobotConfig.ROBOT_LENGTH_MM / 2;
+        double halfWidth = RobotConfig.ROBOT_WIDTH_MM / 2;
+        // Project the rotated rectangle about its geometric center rather than the odometry origin.
+        double centerForwardOffset = halfLength - RobotConfig.CENTER_FROM_REAR_EDGE_MM;
+        double centerRightOffset = halfWidth - RobotConfig.CENTER_FROM_LEFT_EDGE_MM;
+        double forward = forwardMm + cos * centerForwardOffset + sin * centerRightOffset;
+        double right = -leftMm - sin * centerForwardOffset + cos * centerRightOffset;
+        double forwardExtent = Math.abs(cos) * halfLength + Math.abs(sin) * halfWidth;
+        double rightExtent = Math.abs(sin) * halfLength + Math.abs(cos) * halfWidth;
+        return right - rightExtent >= LEFT_GOAL_RIGHT * RobotConfig.TILE_MM
+                && right + rightExtent <= RIGHT_GOAL_RIGHT * RobotConfig.TILE_MM
+                && forward - forwardExtent >= GOAL_FORWARD * RobotConfig.TILE_MM
+                && forward + forwardExtent <= (FIELD_TILES - GOAL_FORWARD) * RobotConfig.TILE_MM;
+    }
 }

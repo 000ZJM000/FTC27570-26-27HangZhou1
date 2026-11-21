@@ -12,6 +12,9 @@ public class BioBuzzTeleOp extends LinearOpMode {
     private static final double LOOP_PERIOD = 0.015;
     private static final double DISPLAY_PERIOD = 0.25;
     private static final double RUN_SHOT_POWER = 0.50;
+    private static final double IDLE_RPM = 2500;
+    private static final double AIM_LOOKAHEAD_SECONDS = 0.08;
+    private static final double MAX_AIM_LEAD_MM = 120;
     private double startRight = RobotConfig.CENTER_FROM_LEFT_EDGE_MM / RobotConfig.TILE_MM;
     private double startForward = RobotConfig.CENTER_FROM_REAR_EDGE_MM / RobotConfig.TILE_MM;
     private double startHeading;
@@ -24,14 +27,14 @@ public class BioBuzzTeleOp extends LinearOpMode {
     @Override public void runOpMode() throws InterruptedException {
         CalibrationStore store = new CalibrationStore(hardwareMap.appContext);
         boolean calibratedMode = usesShotCalibration();
-        ShotVectorField leftField = calibratedMode ? new ShotVectorField(store, false) : null;
-        ShotVectorField rightField = calibratedMode ? new ShotVectorField(store, true) : null;
+        CalibratedShotMap shotMap = calibratedMode ? new CalibratedShotMap(store) : null;
         Drive drive = optional("底盘", () -> new Drive(hardwareMap));
         Turret turret = optional("云台", () -> new Turret(hardwareMap, store));
         Flywheel shooter = optional("飞轮", () -> new Flywheel(hardwareMap, store));
         Intake intake = optional("吸取", () -> new Intake(hardwareMap));
         PinpointPose pose = new PinpointPose(hardwareMap);
         ShotSequence shot = new ShotSequence();
+        RunShotSequence runShot = new RunShotSequence();
 
         Servo pitch = hardwareMap.tryGet(Servo.class, RobotConfig.PITCH_SERVO);
         if (pitch != null) pitch.setPosition(RobotConfig.ST_HOME);
@@ -57,9 +60,11 @@ public class BioBuzzTeleOp extends LinearOpMode {
                 if (turret == null || !turret.calibrated()) telemetry.addData("云台", "先运行 02 自测");
                 else showTurretCalibration(turret);
                 telemetry.addData("飞轮", shooter != null && shooter.rpmCalibrated()
-                        ? calibratedMode ? "从 06 校准读取目标 RPM" : String.format("START 后目标 %.0f RPM",
+                        ? calibratedMode ? String.format("START 后怠速 %.0f RPM", Math.min(IDLE_RPM, shooter.maxTargetRpm()))
+                                : String.format("START 后目标 %.0f RPM",
                                 Math.min(RobotConfig.FLYWHEEL_TARGET_RPM, shooter.maxTargetRpm()))
                         : "先运行 04，自测 RPM 比例和转速曲线");
+                if (shotMap != null) telemetry.addData("射击数据", shotMap.description());
                 if (shooter != null) telemetry.addData("飞轮转向 m-7 / m-8", "%s / %s",
                         shooter.leftDirection(), shooter.encoderDirection());
                 telemetry.update();
@@ -77,6 +82,7 @@ public class BioBuzzTeleOp extends LinearOpMode {
             left = gamepad1.dpad_left;
             right = gamepad1.dpad_right;
             double maxRpm = shooter != null ? shooter.maxTargetRpm() : 0;
+            double idleRpm = Math.min(IDLE_RPM, maxRpm);
             double targetRpm = Math.min(RobotConfig.FLYWHEEL_TARGET_RPM, maxRpm);
             double rpmTrim = 0;
             if (!imuStarted) imuStarted = pose.startImu();
@@ -147,50 +153,56 @@ public class BioBuzzTeleOp extends LinearOpMode {
                 double rpmStep = slower == faster ? 0 : (faster ? 1 : -1) * RobotConfig.FLYWHEEL_RPM_STEP;
                 left = gamepad1.dpad_left;
                 right = gamepad1.dpad_right;
-                if (pose.positionValid) noFireZone = FieldTargets.inNoFireZone(pose.forward, pose.left);
+                if (pose.positionValid && (!calibratedMode || pose.headingValid)) {
+                    noFireZone = calibratedMode ? FieldTargets.fullyInNoFireZone(pose.forward, pose.left, pose.heading)
+                            : FieldTargets.inNoFireZone(pose.forward, pose.left);
+                }
                 boolean automatic = useGoals || noFireZone;
                 boolean positionForAim = pose.positionValid || pose.recentlyLocated(0.40);
-                double rightTiles = -pose.left / RobotConfig.TILE_MM;
-                boolean rightHalf = rightTiles >= ShotVectorField.COLUMNS;
                 ShotVectorField.Vector sample = calibratedMode && field && positionForAim
-                        ? (rightHalf ? rightField : leftField).sample(rightTiles, pose.forward / RobotConfig.TILE_MM)
-                        : null;
+                        ? calibratedAim(shotMap, pose) : null;
+                boolean calibratedArea = sample != null && pose.positionValid && pose.headingValid
+                        && shotMap.allowsShot(-pose.left / RobotConfig.TILE_MM, pose.forward / RobotConfig.TILE_MM);
                 FieldTargets aim = !calibratedMode && automatic && field && positionForAim
                         ? FieldTargets.fromPose(pose.forward, pose.left, pose.heading) : null;
 
                 if (calibratedMode) {
                     double baseRpm = sample == null ? 0 : sample.rpm();
-                    targetRpm = Maths.clip(baseRpm + rpmTrim, 0, maxRpm);
-                    if (sample == null) targetRpm = 0;
-                    else if (rpmStep != 0) {
-                        targetRpm = Maths.clip(targetRpm + rpmStep, 0, maxRpm);
-                        rpmTrim = targetRpm - baseRpm;
+                    double firingRpm = Maths.clip(baseRpm + rpmTrim, 0, maxRpm);
+                    if (sample != null && rpmStep != 0) {
+                        firingRpm = Maths.clip(firingRpm + rpmStep, 0, maxRpm);
+                        rpmTrim = firingRpm - baseRpm;
                     }
+                    targetRpm = firingRpm;
                 } else if (rpmStep != 0) {
                     targetRpm = Maths.clip(targetRpm + rpmStep, 0, maxRpm);
                 }
                 if (turret != null) {
                     if (calibratedMode) {
                         boolean followSample = automatic && sample != null;
-                        turret.aim(pose, followSample ? (rightHalf ? 4 : 3) : 0,
+                        turret.aim(pose, followSample ? 3 : 0,
                                 followSample ? sample.bearing() : 0, effective, dt);
                     } else turret.aim(pose, aim, effective, dt);
                 }
                 if (shooter != null) {
                     shooter.sample();
-                    shooter.requestRpm(targetRpm);
+                    if (calibratedMode) {
+                        boolean prepareShot = triggerHeld && calibratedArea && !noFireZone && targetRpm > 0;
+                        shooter.trackRpm(prepareShot ? targetRpm : idleRpm);
+                    } else shooter.requestRpm(targetRpm);
                 }
-                boolean calibratedArea = sample != null && pose.positionValid && pose.headingValid;
-                boolean angleReady = calibratedMode && turret != null && turret.aimReady();
                 boolean shotBlocked = reverseRequested || noFireZone || targetRpm <= 0
                         || intake == null || turret == null || shooter == null
                         || shooter.faulted() || !shooter.rpmCalibrated() || !shooter.hasBlocker()
-                        || (calibratedMode && (!calibratedArea || (!shot.awaitingApproval() && !angleReady)));
-                boolean checkShot = triggerPressed && !shotBlocked && shot.awaitingApproval();
-                boolean turretStill = checkShot && (calibratedMode
-                        ? angleReady && (!driveIdle || turret.stableForShot()) : turret.stableForShot());
-                boolean speedReady = checkShot && shooter.readyForShot();
-                boolean releaseShot = shot.update(triggerPressed, shotBlocked, turretStill, speedReady);
+                        || (calibratedMode && !calibratedArea);
+                boolean checkShot = triggerHeld && !shotBlocked && (calibratedMode || shot.awaitingApproval());
+                boolean turretReady = checkShot && (calibratedMode
+                        ? turret.aimReady(runShot.aimTolerance()) : turret.stableForShot());
+                boolean speedReady = checkShot && (calibratedMode
+                        ? shooter.readyForShot(runShot.rpmTolerance()) : shooter.readyForShot());
+                boolean releaseShot = calibratedMode
+                        ? runShot.update(timestamp, triggerHeld, shotBlocked, turretReady, speedReady)
+                        : shot.update(triggerPressed, shotBlocked, turretReady, speedReady);
 
                 if (!releaseShot && shooter != null) shooter.feed(false);
                 if (intake != null) intake.set(gamepad1.left_bumper && !triggerHeld, releaseShot, reverseRequested, dt);
@@ -212,8 +224,9 @@ public class BioBuzzTeleOp extends LinearOpMode {
                         else if (shot.interrupted()) telemetry.addData("射击", "供弹已中断，松开 RT 后再按");
                         else if (calibratedMode && !calibratedArea) telemetry.addData("射击", "等待有效定位及 06 可达数据");
                         else if (shotBlocked) telemetry.addData("射击", "检查供弹机构、飞轮和目标转速");
-                        else if (!turretStill) telemetry.addData("射击", calibratedMode ? "等待云台对准" : "等待云台稳定");
+                        else if (!turretReady) telemetry.addData("射击", calibratedMode ? "等待云台对准" : "等待云台稳定");
                         else if (!speedReady) telemetry.addData("射击", "等待飞轮转速进入 ±10%");
+                        else if (calibratedMode) telemetry.addData("射击", "正在确认瞄准与转速");
                     }
                     if (shooter != null) {
                         telemetry.addData("飞轮", shooter.faulted() ? "编码器故障，请停机检查"
@@ -237,7 +250,7 @@ public class BioBuzzTeleOp extends LinearOpMode {
                             pose.forward / RobotConfig.TILE_MM, Math.toDegrees(pose.heading));
                     telemetry.addData("Pinpoint", pose.status);
                     if (!automatic) telemetry.addData("目标", "手动锁方向（X 恢复自瞄）");
-                    else if (calibratedMode) telemetry.addData("目标", sample == null ? "06 范围外、不可达或等待定位"
+                    else if (calibratedMode) telemetry.addData("目标", sample == null ? "等待定位或 06 数据"
                             : String.format("06 向量 / %+.1f° / %.0f RPM", Math.toDegrees(sample.bearing()), sample.rpm()));
                     else telemetry.addData("目标", aim != null ? String.format("得分点 %d / %+.1f°%s", aim.goal,
                             Math.toDegrees(aim.bearing), pose.positionValid ? "" : "（最近有效位置）")
@@ -304,8 +317,8 @@ public class BioBuzzTeleOp extends LinearOpMode {
                     boolean mechanismFault = drive == null || intake == null || turret == null || shooter == null
                             || !turret.calibrated() || !turret.encoderReady() || !turret.motorResponding()
                             || shooter.faulted() || !shooter.rpmCalibrated() || !shooter.hasBlocker();
-                    boolean aimed = calibratedMode ? automatic && calibratedArea && angleReady
-                            : field && aim != null && turret != null && turret.aimReady();
+                    boolean aimed = turret != null && turret.aimReady()
+                            && (calibratedMode ? automatic && calibratedArea : field && aim != null);
                     lights.update(rearState(mechanismFault || !field || !positionForAim, reverseRequested,
                             noFireZone, gamepad1.left_bumper, aimed));
                 }
@@ -322,6 +335,18 @@ public class BioBuzzTeleOp extends LinearOpMode {
                 lights.stop();
             }
         }
+    }
+
+    private static ShotVectorField.Vector calibratedAim(CalibratedShotMap shotMap, PinpointPose pose) {
+        double velocity = Math.hypot(pose.forwardVelocity, pose.leftVelocity);
+        double lead = velocity > 0 ? Math.min(AIM_LOOKAHEAD_SECONDS, MAX_AIM_LEAD_MM / velocity) : 0;
+        double sin = Math.sin(pose.heading), cosChange = Math.cos(pose.heading) - 1;
+        // 06 measures at zero chassis heading. Account for where the turret pivot moved when turning.
+        double forward = pose.forward + pose.forwardVelocity * lead
+                + cosChange * RobotConfig.TURRET_FORWARD_MM + sin * RobotConfig.TURRET_RIGHT_MM;
+        double left = pose.left + pose.leftVelocity * lead
+                + sin * RobotConfig.TURRET_FORWARD_MM - cosChange * RobotConfig.TURRET_RIGHT_MM;
+        return shotMap.sample(-left / RobotConfig.TILE_MM, forward / RobotConfig.TILE_MM);
     }
 
     private static void logPose(PinpointPose pose, Turret turret, boolean idle, boolean rt, boolean firing) {

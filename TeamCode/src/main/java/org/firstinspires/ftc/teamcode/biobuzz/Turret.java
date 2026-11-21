@@ -230,8 +230,12 @@ public final class Turret {
     }
 
     public boolean aimReady() {
+        return aimReady(RobotConfig.SHOT_AIM_TOLERANCE);
+    }
+
+    boolean aimReady(double tolerance) {
         return calibrated() && encoderReady() && motorResponding && fieldTracking && range.reachable && !range.rewinding
-                && Math.abs(worldError) <= RobotConfig.SHOT_AIM_TOLERANCE;
+                && Math.abs(worldError) <= tolerance;
     }
 
     public boolean stableForShot() {

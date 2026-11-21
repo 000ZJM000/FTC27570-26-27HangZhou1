@@ -32,6 +32,7 @@ public final class PinpointPose {
     private int rawX, rawY;
     public boolean headingValid, positionValid;
     public double forward, left, heading, yawRate;
+    double forwardVelocity, leftVelocity;
     public String status = "等待 Pinpoint";
     public String lastFault = "";
     public int faults;
@@ -57,6 +58,7 @@ public final class PinpointPose {
             headingShift = 0;
             lastHeadingTime = Double.NEGATIVE_INFINITY;
             lastYawRate = yawRate = 0;
+            forwardVelocity = leftVelocity = 0;
             headingRejected = positionRejected = false;
             clearReadBackoff();
             return true;
@@ -227,11 +229,17 @@ public final class PinpointPose {
             } else status = jumped ? "Pinpoint 位置跳变" : "Pinpoint 位置非有限值";
             return;
         }
-        positionRejected = false;
         double x = localX - originX, y = localY - originY;
         double c = Math.cos(headingShift), s = Math.sin(headingShift);
+        double previousForward = forward, previousLeft = left;
         forward = fieldForward + c * x - s * y;
         left = fieldLeft + s * x + c * y;
+        if (!positionRejected && elapsed > 0 && elapsed <= POSITION_GRACE) {
+            double blend = elapsed / (0.075 + elapsed);
+            forwardVelocity += blend * ((forward - previousForward) / elapsed - forwardVelocity);
+            leftVelocity += blend * ((left - previousLeft) / elapsed - leftVelocity);
+        } else forwardVelocity = leftVelocity = 0;
+        positionRejected = false;
         copySample(sampleTime);
         positionValid = true;
     }
@@ -251,6 +259,7 @@ public final class PinpointPose {
         }
         forward = fieldForward = forwardMm;
         left = fieldLeft = -rightMm;
+        forwardVelocity = leftVelocity = 0;
         originX = localX;
         originY = localY;
         headingShift = Maths.wrap(fieldHeading - sensorYaw);
