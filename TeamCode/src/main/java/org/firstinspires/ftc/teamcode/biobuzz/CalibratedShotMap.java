@@ -24,7 +24,7 @@ final class CalibratedShotMap {
                 add(recorded, source.centerRightTiles(column), source.centerForwardTiles(row), source.at(column, row));
             }
         }
-        for (ShotVectorField.Refinement point : source.refinements()) {
+        for (ShotVectorField.Refinement point : source.refinementSamples()) {
             add(recorded, point.rightTiles, point.forwardTiles, source.at(point));
         }
         points = new Point[2 * recorded.size()];

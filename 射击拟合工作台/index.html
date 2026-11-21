@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>06 射击拟合工作台</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="samples.js"></script>
+  <script defer src="model.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="header">
+      <div><div class="source">BIOBUZZ / 06 半场校准</div><h1>射击拟合工作台</h1></div>
+      <div class="actions">
+        <button id="open-import" type="button">导入测点</button>
+        <button id="save" class="primary" type="button">保存方案</button>
+      </div>
+    </header>
+    <output id="feedback" class="feedback" aria-live="polite" hidden></output>
+    <section class="metrics" aria-label="拟合统计">
+      <div><span>参与拟合</span><strong id="point-count">—</strong><small id="record-count"></small></div>
+      <div><span>射向误差</span><strong id="angle-error">—</strong><small id="angle-validation"></small></div>
+      <div><span>转速误差</span><strong id="rpm-error">—</strong><small id="rpm-validation"></small></div>
+    </section>
+
+    <div class="dashboard">
+      <section class="panel field-panel" aria-labelledby="field-title">
+        <header class="section-head">
+          <h2 id="field-title">场地向量</h2>
+          <div class="actions toggles">
+            <label><input id="mirror" type="checkbox" checked> 右半场镜像</label>
+            <label><input id="extrapolate" type="checkbox"> 显示外推</label>
+          </div>
+        </header>
+        <canvas id="field" class="field" aria-label="俯视场地，实测点、不可达格与拟合射向"></canvas>
+        <div class="legend">
+          <span><i class="dot"></i>实测点</span>
+          <span><i class="key-region"></i>测点包络</span>
+          <span><i class="hatch"></i>不可达</span>
+          <span class="rpm-legend"><span id="rpm-low">—</span><i class="spectrum"></i><span id="rpm-high">—</span> RPM</span>
+        </div>
+        <section class="probe" aria-label="查询位置">
+          <div class="probe-coordinates">
+            <label>右 <input id="query-x" type="number" min="0" max="6" step="0.01" value="0.50"></label>
+            <label>前 <input id="query-y" type="number" min="0" max="6" step="0.01" value="2.50"></label>
+            <span>格</span>
+          </div>
+          <output id="probe" aria-live="polite"></output>
+        </section>
+      </section>
+
+      <section class="panel fit-panel" aria-labelledby="fit-title">
+        <header class="section-head"><h2 id="fit-title">方程与微调</h2><button id="reset-controls" class="plain" type="button">恢复默认</button></header>
+        <div class="controls">
+          <label>射向修正阶数
+            <select id="angleOrder"><option value="-1">几何瞄准</option><option value="0">常数</option><option value="1">一次</option><option value="2">二次</option></select>
+          </label>
+          <label>RPM 方程阶数
+            <select id="rpmOrder"><option value="0">常数</option><option value="1">一次</option><option value="2">二次</option><option value="3">三次</option></select>
+          </label>
+          <label class="across slider-label"><span>正则化 <output id="ridge-value"></output></span>
+            <input id="ridge" type="range" min="-3" max="1" step="0.01" aria-label="正则化强度">
+          </label>
+          <label>射向微调 ° <input id="angleTrim" type="number" min="-45" max="45" step="0.25"></label>
+          <label>转速微调 RPM <input id="rpmTrim" type="number" min="-1000" max="1000" step="25"></label>
+        </div>
+        <div class="equations">
+          <div class="equation-label"><span>当前方程</span><button id="copy-equations" class="plain" type="button">复制</button></div>
+          <div class="variables">u = x − 0.5，v = (y − 3) / 3，x 右 · y 前，以格为单位</div>
+          <pre id="equations"></pre>
+          <p>右半场用 x → 6 − x，射向取反。测点包络之外的读数为外推。</p>
+        </div>
+        <div class="selection" id="selection">
+          <div class="equation-label"><span id="selection-title">测点微调</span><button id="clear-selection" class="plain" type="button" hidden>取消选中</button></div>
+          <p id="selection-hint">点场地图上的实测点，或在下方表格选中一个点。</p>
+          <div id="residuals" class="residuals" aria-label="射向偏差较大的测点"></div>
+          <form id="edit-form" class="controls" hidden>
+            <label>实测射向 ° <input id="edit-angle" type="number" min="-180" max="180" step="any" required></label>
+            <label>实测转速 RPM <input id="edit-rpm" type="number" min="1" max="20000" step="any" required></label>
+            <label>拟合权重 <input id="edit-weight" type="number" min="0" max="5" step="0.25" required></label>
+            <button type="submit" class="primary edit-submit">应用到测点</button>
+          </form>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel profile-panel" aria-labelledby="profile-title">
+      <header class="section-head">
+        <div><h2 id="profile-title">纵向剖面</h2><p id="profile-location"></p></div>
+        <div class="legend"><span><i class="line"></i>拟合曲线</span><span><i class="dot"></i>邻近实测</span></div>
+      </header>
+      <div class="profiles">
+        <div><h3>射向 °</h3><canvas id="angle-profile" aria-label="射向随前坐标变化的曲线"></canvas></div>
+        <div><h3>目标转速 RPM</h3><canvas id="rpm-profile" aria-label="转速随前坐标变化的曲线"></canvas></div>
+      </div>
+    </section>
+
+    <section class="panel data-panel" aria-labelledby="data-title">
+      <header class="section-head">
+        <h2 id="data-title">校准记录</h2>
+        <div class="actions">
+          <label class="check"><input id="show-blocked" type="checkbox" checked> 显示不可达</label>
+          <button id="csv" type="button">下载 CSV</button>
+        </div>
+      </header>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>点位</th><th>右 / 前（格）</th><th>射向 °</th><th>RPM</th><th>射向残差 °</th><th>RPM 残差</th><th>权重 / 状态</th></tr></thead>
+          <tbody id="records"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="import-dialog" aria-labelledby="import-title">
+    <form id="import-form">
+      <div class="section-head"><h2 id="import-title">导入测点或方案</h2><button id="close-import" class="plain" type="button">关闭</button></div>
+      <label class="import-text">粘贴 07 截图文字或方案 JSON
+        <textarea id="import-text" rows="9" spellcheck="false" placeholder="110:-4675/3100 111:-4232/3200 120:?!"></textarea>
+      </label>
+      <p>07 记录按点位和坐标合并。导入方案会加载其中保存的测点和拟合参数。</p>
+      <output id="import-error" class="import-error" role="alert"></output>
+      <div class="actions import-actions">
+        <label class="file-label">选择文件<input id="import-file" type="file" accept=".txt,.json"></label>
+        <button type="submit" class="primary">导入</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

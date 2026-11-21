@@ -52,7 +52,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
                 if (gamepad1.dpad_right) rightHalf = true;
                 telemetry.addLine("方向键左 / 右选半场。将云台轻摆到最右端后按 START。");
                 telemetry.addData("3 × 6", rightHalf ? "右半场（右坐标 3–6 格）" : "左半场（右坐标 0–3 格）");
-                telemetry.addLine("每点将麦轮中心放在格子中心，车头朝场地正前方。");
+                telemetry.addLine("车头朝场地正前。格心模式摆格心，四角精测按地垫接缝摆车。");
                 if (!turret.calibrated()) telemetry.addLine("试射前先完成 02 云台行程和正前方向标定。");
                 if (!flywheel.rpmCalibrated()) telemetry.addLine("试射前先完成 04 飞轮 RPM 标定。");
                 telemetry.update();
@@ -201,7 +201,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
         ShotVectorField.Vector shot = field.at(point);
         if (shot == null) shot = field.at(point.column, point.row);
         targetRpm = Math.min(shot.rpm(), maxRpm);
-        status = "将麦轮中心摆到精测坐标，车头朝正前";
+        status = "照摆车提示对齐两条地垫缝";
     }
 
     private ShotVectorField.Refinement selectedRefinement() {
@@ -287,11 +287,9 @@ public final class ShotFieldCalibration extends LinearOpMode {
         } else {
             telemetry.addData("精测点", "%d / %d，%s", refinementIndex + 1, refinements.size(),
                     field.isUnreachable(point) ? "不可达" : field.at(point) != null ? "已保存" : "待测");
-            telemetry.addData("场地 右 / 前", "%.0f / %.0f mm，车头朝正前",
-                    point.rightTiles * RobotConfig.TILE_MM, point.forwardTiles * RobotConfig.TILE_MM);
-            telemetry.addData("距父格中心 右 / 前", "%+.0f / %+.0f mm",
-                    (point.rightTiles - field.centerRightTiles(point.column)) * RobotConfig.TILE_MM,
-                    (point.forwardTiles - field.centerForwardTiles(point.row)) * RobotConfig.TILE_MM);
+            telemetry.addData("地垫", "第 %d 行 · 第 %d 列（从场地左后角数）", point.row + 1, point.fieldColumn);
+            telemetry.addData("摆车", "车身%s角对地垫%s角", point.corner.label, point.corner.label);
+            telemetry.addLine("车头朝场地正前，车身两条边沿着接缝，整车放在这块地垫内。");
         }
         telemetry.addData("云台", "%s · %s", turret.motorResponding() ? (brake ? "刹车" : "可手摆") : "电机不可用",
                 turret.encoderReady() ? String.format("%+.1f°（左为正）", Math.toDegrees(turret.boreRelative())) : "角度不可用");
@@ -304,7 +302,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
         showVector("待保存", pending);
         showVector("当前点已保存", point == null ? field.at(column, row) : field.at(point));
         if (point == null) showGrid();
-        telemetry.addLine(point == null ? "方向键选格 | Back 进入精测" : "方向键左/右换点 | Back 回格心");
+        telemetry.addLine(point == null ? "方向键选格 | Back 四角精测" : "方向键左/右换角 | Back 回格心");
         telemetry.addLine("LB/RB −/+" + RPM_STEP + " RPM | X 刹车/松开");
         telemetry.addLine("RT 单次试射 | A 保存试射 | Y 不可达/恢复 | B 取消试射");
         telemetry.update();

@@ -7,11 +7,9 @@ import java.util.List;
 public final class ShotVectorField {
     public static final int COLUMNS = 3, ROWS = 6;
     private static final int RECORD_SIZE = 3;
-    private static final int REFINEMENTS_PER_CELL = 8;
+    private static final Corner[] CORNERS = Corner.values();
+    private static final int LEGACY_REFINEMENTS_PER_CELL = 8;
     private static final int REFINE_RECORD_SIZE = 5;
-    private static final double REFINE_STEP_TILES = 0.25;
-    private static final double CLEARANCE_MM = 20;
-    private static final double MIN_SPACING_TILES = 20 / RobotConfig.TILE_MM;
     private final CalibrationStore store;
     private final String key, refinementKey;
     private final int firstColumn;
@@ -19,17 +17,21 @@ public final class ShotVectorField {
     private double[] records;
     // Positions keep saved shots tied to their actual pose when the reachability map changes.
     private double[] refinedRecords;
-    private final Refinement[] refinements = new Refinement[ROWS * COLUMNS * REFINEMENTS_PER_CELL];
+    private final double[] legacyRecords;
+    private final Refinement[] refinements = new Refinement[ROWS * COLUMNS * CORNERS.length];
+    private final Refinement[] legacyRefinements = new Refinement[ROWS * COLUMNS * LEGACY_REFINEMENTS_PER_CELL];
 
     public ShotVectorField(CalibrationStore store, boolean rightHalf) {
         this.store = store;
         key = rightHalf ? "shot_vector_field_right_v1" : "shot_vector_field_left_v1";
-        refinementKey = rightHalf ? "shot_vector_refinements_right_v1" : "shot_vector_refinements_left_v1";
+        String refinementPrefix = rightHalf ? "shot_vector_refinements_right" : "shot_vector_refinements_left";
+        refinementKey = refinementPrefix + "_v2";
         firstColumn = rightHalf ? COLUMNS : 0;
         records = store.readExact(key, ROWS * COLUMNS * RECORD_SIZE);
         if (records == null) records = new double[ROWS * COLUMNS * RECORD_SIZE];
         refinedRecords = store.readExact(refinementKey, refinements.length * REFINE_RECORD_SIZE);
         if (refinedRecords == null) refinedRecords = new double[refinements.length * REFINE_RECORD_SIZE];
+        legacyRecords = store.readExact(refinementPrefix + "_v1", legacyRefinements.length * REFINE_RECORD_SIZE);
         generateRefinements();
     }
 
@@ -76,32 +78,88 @@ public final class ShotVectorField {
         return result;
     }
 
+    List<Refinement> refinementSamples() {
+        List<Refinement> result = refinements();
+        for (Refinement point : legacyRefinements) {
+            if (point != null) result.add(point);
+        }
+        return result;
+    }
+
+    /** Lists the saved values even when a point has since been marked unreachable or disabled. */
+    public List<PointData> pointsForReview() {
+        List<PointData> points = new ArrayList<>();
+        for (int row = 0; row < ROWS; row++) {
+            for (int column = 0; column < COLUMNS; column++) {
+                int fieldColumn = firstColumn + column + 1;
+                int index = offset(column, row);
+                points.add(new PointData(row + 1, fieldColumn, "格心", '0', centerRightTiles(column),
+                        centerForwardTiles(row), vector(records[index + 1], records[index + 2]),
+                        records[index] == 1, false));
+
+                int cell = row * COLUMNS + column;
+                for (Corner corner : CORNERS) {
+                    int slot = cell * CORNERS.length + corner.ordinal();
+                    String label = corner.label + "角";
+                    char code = (char) ('1' + corner.ordinal());
+                    Refinement current = refinements[slot];
+                    boolean savedAtCurrentPose = addSavedRefinement(points, row + 1, fieldColumn, label, code,
+                            refinedRecords, slot, current);
+                    if (current != null && !savedAtCurrentPose) {
+                        points.add(new PointData(row + 1, fieldColumn, label, code, current.rightTiles,
+                                current.forwardTiles, null, false, false));
+                    }
+                }
+                if (legacyRecords == null) continue;
+                for (int i = 0; i < LEGACY_REFINEMENTS_PER_CELL; i++) {
+                    int slot = cell * LEGACY_REFINEMENTS_PER_CELL + i;
+                    addSavedRefinement(points, row + 1, fieldColumn, "旧精测 " + (i + 1), (char) ('a' + i),
+                            legacyRecords, slot, legacyRefinements[slot]);
+                }
+            }
+        }
+        return points;
+    }
+
+    private static boolean addSavedRefinement(List<PointData> points, int row, int column, String label, char code,
+                                             double[] saved, int slot, Refinement current) {
+        int index = slot * REFINE_RECORD_SIZE;
+        boolean unreachable = saved[index] == 1;
+        Vector shot = vector(saved[index + 3], saved[index + 4]);
+        if (!unreachable && shot == null) return false;
+        boolean currentPose = current != null && matches(current, saved);
+        points.add(new PointData(row, column, label, code, saved[index + 1], saved[index + 2], shot,
+                unreachable, !currentPose));
+        return currentPose;
+    }
+
     public boolean isUnreachable(Refinement point) {
-        return matches(point) && refinedRecords[point.slot * REFINE_RECORD_SIZE] == 1;
+        double[] saved = point.corner == null ? legacyRecords : refinedRecords;
+        return matches(point, saved) && saved[point.slot * REFINE_RECORD_SIZE] == 1;
     }
 
     public Vector at(Refinement point) {
+        double[] saved = point.corner == null ? legacyRecords : refinedRecords;
         int index = point.slot * REFINE_RECORD_SIZE;
-        return matches(point) && refinedRecords[index] == 0
-                ? vector(refinedRecords[index + 3], refinedRecords[index + 4]) : null;
+        return matches(point, saved) && saved[index] == 0 ? vector(saved[index + 3], saved[index + 4]) : null;
     }
 
     public boolean save(Refinement point, Vector shot) {
-        return refinements[point.slot] == point && !isUnreachable(point) && valid(shot)
+        return point.corner != null && refinements[point.slot] == point && !isUnreachable(point) && valid(shot)
                 && writeRefinement(point, false, shot.forward, shot.right);
     }
 
     public boolean setUnreachable(Refinement point, boolean unreachable) {
-        if (refinements[point.slot] != point) return false;
+        if (point.corner == null || refinements[point.slot] != point) return false;
         int index = point.slot * REFINE_RECORD_SIZE;
-        boolean samePosition = matches(point);
+        boolean samePosition = matches(point, refinedRecords);
         return writeRefinement(point, unreachable, samePosition ? refinedRecords[index + 3] : 0,
                 samePosition ? refinedRecords[index + 4] : 0);
     }
 
-    private boolean matches(Refinement point) {
+    private static boolean matches(Refinement point, double[] saved) {
         int index = point.slot * REFINE_RECORD_SIZE;
-        return refinedRecords[index + 1] == point.rightTiles && refinedRecords[index + 2] == point.forwardTiles;
+        return saved[index + 1] == point.rightTiles && saved[index + 2] == point.forwardTiles;
     }
 
     private boolean writeRefinement(Refinement point, boolean unreachable, double forward, double right) {
@@ -118,44 +176,52 @@ public final class ShotVectorField {
     }
 
     private void generateRefinements() {
-        int slot = 0;
+        boolean fitsTile = RobotConfig.ROBOT_WIDTH_MM <= RobotConfig.TILE_MM
+                && RobotConfig.ROBOT_LENGTH_MM <= RobotConfig.TILE_MM;
         for (int row = 0; row < ROWS; row++) {
             for (int column = 0; column < COLUMNS; column++) {
-                boolean measured = at(column, row) != null;
-                for (int forward = -1; forward <= 1; forward++) {
-                    for (int right = -1; right <= 1; right++) {
-                        if (forward == 0 && right == 0) continue;
-                        refinements[slot] = measured ? refine(slot, column, row, right, forward) : null;
-                        slot++;
-                    }
+                boolean measured = measured(column, row);
+                int cell = row * COLUMNS + column;
+                for (Corner corner : CORNERS) {
+                    int slot = cell * CORNERS.length + corner.ordinal();
+                    refinements[slot] = measured && fitsTile ? cornerPoint(slot, column, row, corner) : null;
+                }
+                if (legacyRecords == null) continue;
+                for (int i = 0; i < LEGACY_REFINEMENTS_PER_CELL; i++) {
+                    int slot = cell * LEGACY_REFINEMENTS_PER_CELL + i;
+                    legacyRefinements[slot] = measured ? storedLegacyPoint(slot, column, row) : null;
                 }
             }
         }
     }
 
-    private Refinement refine(int slot, int column, int row, int right, int forward) {
-        double x = centerRightTiles(column), y = centerForwardTiles(row);
-        double dx = right * REFINE_STEP_TILES, dy = forward * REFINE_STEP_TILES;
-        double fraction = 1;
-        if (!fits(x + dx, y + dy)) {
-            // The center fits. Shorten the offset along this ray to the clearance boundary.
-            double low = 0, high = 1;
-            for (int i = 0; i < 14; i++) {
-                double middle = (low + high) / 2;
-                if (fits(x + middle * dx, y + middle * dy)) low = middle;
-                else high = middle;
-            }
-            fraction = low;
-        }
-        if (fraction * Math.hypot(dx, dy) < MIN_SPACING_TILES) return null;
-        return new Refinement(slot, column, row, x + fraction * dx, y + fraction * dy);
+    private Refinement cornerPoint(int slot, int column, int row, Corner corner) {
+        double tile = RobotConfig.TILE_MM;
+        double right = firstColumn + column + (corner.onRight
+                ? 1 - RobotConfig.CENTER_FROM_RIGHT_EDGE_MM / tile : RobotConfig.CENTER_FROM_LEFT_EDGE_MM / tile);
+        double forward = row + (corner.atFront
+                ? 1 - RobotConfig.CENTER_FROM_FRONT_EDGE_MM / tile : RobotConfig.CENTER_FROM_REAR_EDGE_MM / tile);
+        return new Refinement(slot, column, firstColumn + column + 1, row, right, forward, corner);
     }
 
-    private boolean fits(double right, double forward) {
-        double leftEdge = right - (RobotConfig.CENTER_FROM_LEFT_EDGE_MM + CLEARANCE_MM) / RobotConfig.TILE_MM;
-        double rightEdge = right + (RobotConfig.CENTER_FROM_RIGHT_EDGE_MM + CLEARANCE_MM) / RobotConfig.TILE_MM;
-        double rearEdge = forward - (RobotConfig.CENTER_FROM_REAR_EDGE_MM + CLEARANCE_MM) / RobotConfig.TILE_MM;
-        double frontEdge = forward + (RobotConfig.CENTER_FROM_FRONT_EDGE_MM + CLEARANCE_MM) / RobotConfig.TILE_MM;
+    private Refinement storedLegacyPoint(int slot, int column, int row) {
+        int index = slot * REFINE_RECORD_SIZE;
+        if (legacyRecords[index] == 0 && legacyRecords[index + 3] == 0 && legacyRecords[index + 4] == 0) {
+            return null;
+        }
+        double right = legacyRecords[index + 1], forward = legacyRecords[index + 2];
+        int fieldColumn = firstColumn + column;
+        if (right <= fieldColumn || right >= fieldColumn + 1 || forward <= row || forward >= row + 1
+                || !fitsLegacyPose(right, forward)) return null;
+        return new Refinement(slot, column, fieldColumn + 1, row, right, forward, null);
+    }
+
+    private boolean fitsLegacyPose(double right, double forward) {
+        double clearanceMm = 20;
+        double leftEdge = right - (RobotConfig.CENTER_FROM_LEFT_EDGE_MM + clearanceMm) / RobotConfig.TILE_MM;
+        double rightEdge = right + (RobotConfig.CENTER_FROM_RIGHT_EDGE_MM + clearanceMm) / RobotConfig.TILE_MM;
+        double rearEdge = forward - (RobotConfig.CENTER_FROM_REAR_EDGE_MM + clearanceMm) / RobotConfig.TILE_MM;
+        double frontEdge = forward + (RobotConfig.CENTER_FROM_FRONT_EDGE_MM + clearanceMm) / RobotConfig.TILE_MM;
         if (leftEdge < firstColumn || rightEdge > firstColumn + COLUMNS
                 || rearEdge < 0 || frontEdge > FieldTargets.FIELD_TILES) return false;
         for (int r = 0; r < ROWS; r++) {
@@ -179,9 +245,10 @@ public final class ShotVectorField {
     private boolean nearUnreachableRefinement(int column, int row, double right, double forward) {
         boolean blocked = false;
         double nearest = squaredDistance(right, forward, centerRightTiles(column), centerForwardTiles(row));
-        int first = (row * COLUMNS + column) * REFINEMENTS_PER_CELL;
-        for (int i = first; i < first + REFINEMENTS_PER_CELL; i++) {
-            Refinement point = refinements[i];
+        int cell = row * COLUMNS + column;
+        for (int i = 0; i < CORNERS.length + LEGACY_REFINEMENTS_PER_CELL; i++) {
+            Refinement point = i < CORNERS.length ? refinements[cell * CORNERS.length + i]
+                    : legacyRefinements[cell * LEGACY_REFINEMENTS_PER_CELL + i - CORNERS.length];
             if (point == null) continue;
             boolean unreachable = isUnreachable(point);
             if (!unreachable && at(point) == null) continue;
@@ -219,17 +286,58 @@ public final class ShotVectorField {
         return (row * COLUMNS + column) * RECORD_SIZE;
     }
 
+    public enum Corner {
+        REAR_LEFT("左后", false, false),
+        REAR_RIGHT("右后", true, false),
+        FRONT_RIGHT("右前", true, true),
+        FRONT_LEFT("左前", false, true);
+
+        public final String label;
+        private final boolean onRight, atFront;
+
+        Corner(String label, boolean onRight, boolean atFront) {
+            this.label = label;
+            this.onRight = onRight;
+            this.atFront = atFront;
+        }
+    }
+
     public static final class Refinement {
-        public final int column, row;
+        public final int column, fieldColumn, row;
         public final double rightTiles, forwardTiles;
+        public final Corner corner;
         private final int slot;
 
-        private Refinement(int slot, int column, int row, double right, double forward) {
+        private Refinement(int slot, int column, int fieldColumn, int row, double right, double forward, Corner corner) {
             this.slot = slot;
             this.column = column;
+            this.fieldColumn = fieldColumn;
             this.row = row;
+            this.corner = corner;
             rightTiles = right;
             forwardTiles = forward;
+        }
+    }
+
+    public static final class PointData {
+        public final int row, column;
+        public final String label;
+        public final char code;
+        public final double rightTiles, forwardTiles;
+        public final Vector shot;
+        public final boolean unreachable, inactive;
+
+        private PointData(int row, int column, String label, char code, double right, double forward, Vector shot,
+                          boolean unreachable, boolean inactive) {
+            this.row = row;
+            this.column = column;
+            this.label = label;
+            this.code = code;
+            this.rightTiles = right;
+            this.forwardTiles = forward;
+            this.shot = shot;
+            this.unreachable = unreachable;
+            this.inactive = inactive;
         }
     }
 
