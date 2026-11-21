@@ -10,15 +10,29 @@ final class TurretMotion {
     static boolean go(CalibrationOp op, Turret turret, double angle, double tolerance)
             throws InterruptedException {
         if (!quiet(op, turret, 1.35)) return false;
+        boolean retry = false;
         for (double maxSpeed : new double[]{1.85, 0.66}) {
             if (Math.abs(turret.angle - angle) <= tolerance) return true;
+            if (retry) {
+                op.show("云台卡点恢复", "误差 %+.1f°，尝试短脉冲退出后重新定位", Math.toDegrees(angle - turret.angle));
+                int direction = angle > turret.angle ? 1 : -1;
+                if (!nudge(op, turret, direction) && !nudge(op, turret, -direction)) return false;
+                if (!quiet(op, turret, 1.35)) return false;
+                if (Math.abs(turret.angle - angle) <= tolerance) return true;
+            }
             double[] reference = {turret.angle, 0};
+            double[] progress = {Math.abs(angle - turret.angle), 0};
             double duration = 1.6 + Math.abs(angle - turret.angle) / maxSpeed;
             try {
                 op.runFor(duration, (time, dt) -> {
                     turret.sample(dt);
                     if (!turret.encoderReady() || !turret.motorResponding()) return false;
                     if (Math.abs(turret.angle - angle) <= tolerance && Math.abs(turret.speed) < 0.14) return false;
+                    double distance = Math.abs(angle - turret.angle);
+                    if (distance < progress[0] - Math.toRadians(0.40) || Math.abs(turret.speed) > 0.13) {
+                        progress[0] = distance;
+                        progress[1] = time;
+                    } else if (time - progress[1] > 0.70) return false;
                     double remaining = angle - reference[0];
                     double velocity = Math.copySign(Math.min(maxSpeed, Math.sqrt(3.2 * Math.abs(remaining))), remaining);
                     reference[1] += Maths.clip(velocity - reference[1], -2.4 * dt, 2.4 * dt);
@@ -38,8 +52,31 @@ final class TurretMotion {
             }
             if (!quiet(op, turret, 1.35)) return false;
             if (Math.abs(turret.angle - angle) <= tolerance) return true;
+            retry = true;
         }
         return false;
+    }
+
+    private static boolean nudge(CalibrationOp op, Turret turret, int direction) throws InterruptedException {
+        if (!op.opModeIsActive() || op.motionAborted() || !turret.encoderReady() || !turret.motorResponding()) return false;
+        double origin = turret.angle;
+        double remaining = direction > 0 ? turret.span() - origin : origin;
+        if (remaining < RobotConfig.TURRET_MARGIN + Math.toRadians(1)) return false;
+        double[] progress = {0};
+        try {
+            op.runFor(0.36, (time, dt) -> {
+                turret.sample(dt);
+                if (!turret.encoderReady() || !turret.motorResponding()) return false;
+                progress[0] = direction * (turret.angle - origin);
+                if (progress[0] >= Math.toRadians(1.4)) return false;
+                double start = turret.frictionDuty(turret.angle, direction, 0);
+                turret.power(direction * Maths.clip(start + 0.06 + 0.55 * time, 0.16, 0.50));
+                return turret.motorResponding();
+            });
+            return !op.motionAborted() && progress[0] >= Math.toRadians(0.6);
+        } finally {
+            turret.stop();
+        }
     }
 
     static boolean quiet(CalibrationOp op, Turret turret, double timeout) throws InterruptedException {

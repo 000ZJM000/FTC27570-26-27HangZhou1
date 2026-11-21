@@ -442,7 +442,7 @@ public class BioBuzzTeleOp extends LinearOpMode {
     private void showTurretCalibration(Turret turret) {
         double[] gains = turret.pidGains();
         double[] coupling = turret.coupling();
-        String pidSource = turret.usesSavedPid() ? "已保存的 05" : turret.plantIdentified() ? "02 基线" : "默认";
+        String pidSource = turret.usesSavedPid() ? "02 / 05 实测" : turret.plantIdentified() ? "02 基线" : "默认";
         telemetry.addData("云台 PID P / I / D", "%s  %.3f / %.3f / %.3f", pidSource, gains[0], gains[1], gains[2]);
         telemetry.addData("云台刹车模型 / 摩擦", "%s / %s", turret.plantIdentified() ? "已加载 02" : "默认",
                 turret.hasFrictionMap() ? "已加载分段表" : "方向基线");

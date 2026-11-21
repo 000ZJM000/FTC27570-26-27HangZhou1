@@ -36,7 +36,7 @@ public final class CalibrationStore {
     public static final String FLYWHEEL_FULL_POWER_MODEL = "flywheel_model_full_power_v1";
     public static final String FLYWHEEL_PID = "flywheel_pid";
     public static final String FLYWHEEL_VOLTAGE_PID = "flywheel_12v_hybrid_pid_v1";
-    public static final String FLYWHEEL_VOLTAGE_PID_HISTORY = "flywheel_12v_hybrid_pid_history_v1";
+    public static final String FLYWHEEL_VOLTAGE_PID_HISTORY = "flywheel_12v_hybrid_pid_history_v2";
 
     private static final String CALIBRATION = "calibration.json";
     private static final Object LOCK = new Object();

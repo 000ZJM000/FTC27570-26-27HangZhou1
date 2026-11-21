@@ -47,11 +47,9 @@ public final class TurretCalibration extends CalibrationOp {
                         || !confirm("12V 动力学未通过。A 回中后重试，B 结束。") || !center(turret)) return;
             }
             plant = "已保存";
-            if (!new TurretFrictionCalibration(this).run(turret)) {
-                friction = "未通过，保留上次值";
-                return;
-            }
-            friction = "已保存";
+            TurretFrictionCalibration measurement = new TurretFrictionCalibration(this);
+            friction = measurement.run(turret);
+            if (!opModeIsActive() || motionAborted() || measurement.feedbackLost()) return;
 
             turret = new Turret(hardwareMap, store, battery);
             turret.homeAtRight(homeTick);

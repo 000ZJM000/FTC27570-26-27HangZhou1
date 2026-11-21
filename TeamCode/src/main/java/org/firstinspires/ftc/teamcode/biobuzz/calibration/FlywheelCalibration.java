@@ -146,6 +146,10 @@ public final class FlywheelCalibration extends CalibrationOp {
             return false;
         }
         double ref = points.get(points.size() - 1)[0];
+        if (points.get(0)[0] > 0.88 * ref) {
+            telemetry.log().add("最低与最高档的稳态转速过于接近，保留旧前馈曲线。");
+            return false;
+        }
         double[] curve = fitCurve(points, ref, true);
         if (!Flywheel.validModel(curve)) curve = fitCurve(points, ref, false);
         if (!Flywheel.validModel(curve)) {
@@ -167,29 +171,50 @@ public final class FlywheelCalibration extends CalibrationOp {
     }
 
     private double[] measurePlateau(Flywheel wheel, BatteryVoltage battery, double volts) throws InterruptedException {
-        double[] stable = {0, 0, 0, 0};
+        Plateau plateau = new Plateau();
         runFor(5.5, (t, dt) -> {
             wheel.sample();
             if (wheel.faulted()) return false;
             double delivered = wheel.deliveredVolts();
             double target = Math.min(volts, battery.volts());
-            if (t > 0.7 && wheel.speed > 10 && Math.abs(delivered - target) < 0.12
-                    && Math.abs(wheel.speed - stable[3]) < Math.max(3, 0.018 * wheel.speed)) {
-                stable[0] += dt;
-                stable[1] += wheel.speed * dt;
-                stable[2] += delivered * dt;
-            } else stable[0] = stable[1] = stable[2] = 0;
-            stable[3] = wheel.speed;
+            if (t >= 1.8 && volts == VOLTAGE_LEVELS[0] && wheel.speed <= 10) return false;
+            if (t > 0.7 && wheel.speed > 10 && Math.abs(delivered - target) < 0.12) {
+                plateau.sample(wheel.speed, delivered, dt);
+            } else plateau.reset();
             wheel.powerVolts(volts, dt);
             show("飞轮空载曲线", "%.1f V / 实际 %.2f V / %.0f ticks/s", volts, delivered, wheel.speed);
-            return stable[0] < 0.55;
+            return !plateau.ready();
         });
-        return stable[0] >= 0.55 ? new double[]{stable[1] / stable[0], stable[2] / stable[0]} : null;
+        return plateau.ready() ? new double[]{plateau.speedIntegral / plateau.time, plateau.voltsIntegral / plateau.time}
+                : null;
+    }
+
+    private static final class Plateau {
+        double time, speedIntegral, voltsIntegral;
+        double minimum = Double.POSITIVE_INFINITY, maximum = Double.NEGATIVE_INFINITY;
+
+        void sample(double speed, double volts, double dt) {
+            double low = Math.min(minimum, speed), high = Math.max(maximum, speed);
+            if (high - low > Math.max(3, 0.03 * high)) reset();
+            minimum = Math.min(minimum, speed);
+            maximum = Math.max(maximum, speed);
+            time += dt;
+            speedIntegral += speed * dt;
+            voltsIntegral += volts * dt;
+        }
+
+        void reset() {
+            time = speedIntegral = voltsIntegral = 0;
+            minimum = Double.POSITIVE_INFINITY;
+            maximum = Double.NEGATIVE_INFINITY;
+        }
+
+        boolean ready() { return time >= 0.55; }
     }
 
     private void testRecovery(Flywheel wheel) throws InterruptedException {
         Intake intake = new Intake(hardwareMap);
-        double target = Math.min(RobotConfig.FLYWHEEL_TARGET_RPM, 0.96 * wheel.maxTargetRpm());
+        double target = Math.min(RobotConfig.FLYWHEEL_TARGET_RPM, 0.96 * wheel.maxTargetRpmAtBattery());
         double[] drop = {Double.NaN, 0};
         boolean[] feeding = {false};
         try {

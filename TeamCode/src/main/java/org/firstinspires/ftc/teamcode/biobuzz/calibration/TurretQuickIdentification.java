@@ -17,7 +17,14 @@ final class TurretQuickIdentification {
     boolean run() throws InterruptedException {
         double[] breakaway = {findBreakaway(1), findBreakaway(-1)};
         for (int side = 0; side < 2 && active(); side++) {
-            if (breakaway[side] == 0) breakaway[side] = findBreakaway(side == 0 ? 1 : -1);
+            if (breakaway[side] != 0) continue;
+            int direction = side == 0 ? 1 : -1;
+            double nearby = turret.span() / 2 - direction * Math.min(0.10 * turret.span(), Math.toRadians(12));
+            op.show("起转换位重试", "移到 %.1f° 后重测%s起转",
+                    Math.toDegrees(nearby), direction > 0 ? "左转" : "右转");
+            if (TurretMotion.go(op, turret, nearby, Math.toRadians(1.7))) {
+                breakaway[side] = findBreakaway(direction);
+            }
         }
         if (!active() || breakaway[0] == 0 || breakaway[1] == 0) {
             op.telemetry.log().add("快速辨识未检测到双向起转，检查编码器、线束或静摩擦。");

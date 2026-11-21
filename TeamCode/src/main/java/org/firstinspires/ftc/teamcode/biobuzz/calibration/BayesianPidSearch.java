@@ -14,8 +14,9 @@ final class BayesianPidSearch {
     static final int MIN_ROUNDS = 8, MAX_ROUNDS = 12;
     static final int HISTORY_STRIDE = 6, HISTORY_ROWS = 40;
     static final int VERIFICATION_ROUNDS = 2;
-    private static final int FINALISTS = 2, RECORD_PATIENCE = 4;
+    private static final int RECORD_PATIENCE = 4;
     private final double[] min, max, scale;
+    private final int finalistsLimit;
     private final Random random = new Random(27270);
     private final List<Observation> data = new ArrayList<>();
     private final List<Review> reviews = new ArrayList<>();
@@ -69,9 +70,14 @@ final class BayesianPidSearch {
     }
 
     BayesianPidSearch(double[] min, double[] max, double[] scale) {
+        this(min, max, scale, 2);
+    }
+
+    BayesianPidSearch(double[] min, double[] max, double[] scale, int finalistsLimit) {
         this.min = min.clone();
         this.max = max.clone();
         this.scale = scale.clone();
+        this.finalistsLimit = finalistsLimit;
     }
 
     List<Review> reviews() { return new ArrayList<>(reviews); }
@@ -142,7 +148,7 @@ final class BayesianPidSearch {
         for (Observation o : ranked) {
             if (!o.result.settled || o.result.margin < 0) continue;
             if (finalists.stream().noneMatch(x -> distance(x, o.x) <= 0.035)) finalists.add(o.x);
-            if (finalists.size() == FINALISTS) break;
+            if (finalists.size() == finalistsLimit) break;
         }
         double[][] costs = new double[finalists.size()][VERIFICATION_ROUNDS];
         double[] steadyErrors = new double[finalists.size()];

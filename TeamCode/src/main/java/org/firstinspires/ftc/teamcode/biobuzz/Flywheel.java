@@ -5,12 +5,14 @@ import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple.Direction;
 import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.util.RobotLog;
 
 public final class Flywheel {
     private static final double[] DEFAULT_PID = {1.5, 0.35, 0.025};
     private static final double BOOST_ERROR_RPM = 100;
     private static final double COAST_ERROR_RPM = 35;
     private static final double COLD_START_SECONDS = 0.40;
+    private static final double OPEN_LOOP_STALL_VOLTS = 4.5;
     private final DcMotorEx m7, m8;
     private final Servo blocker;
     private final BatteryVoltage battery;
@@ -22,7 +24,7 @@ public final class Flywheel {
     public final double ticksPerRev;
     private double lastSampleTime = Maths.time(), lastMotion = lastSampleTime;
     private double acceleration, sampleDt, coldStartedAt = Double.NaN;
-    private boolean fault;
+    private boolean fault, stallWatchdogArmed;
     public double speed, target, output;
 
     public Flywheel(HardwareMap map, CalibrationStore store) {
@@ -152,9 +154,14 @@ public final class Flywheel {
             speed += elapsed / (0.012 + elapsed) * (reading - speed);
             acceleration = elapsed > 0.10 ? 0 : (speed - prior) / elapsed;
             sampleDt = elapsed;
-            if (output > 0.22 && now - lastMotion > 0.85) fault = true;
+            if (stallWatchdogArmed && now - lastMotion > 0.85) {
+                fault = true;
+                RobotLog.ww("BioBuzzFlywheel", "No encoder motion at %.2f V, battery %.2f V, target %.0f RPM",
+                        deliveredVolts(), battery.volts(), ticksPerRev > 0 ? target * 60 / ticksPerRev : 0);
+            }
         } catch (RuntimeException unavailable) {
             fault = true;
+            RobotLog.ww("BioBuzzFlywheel", "%s", unavailable.toString());
         }
         if (fault) stop();
     }
@@ -195,7 +202,10 @@ public final class Flywheel {
 
     private void writeVolts(double volts) {
         double next = fault ? 0 : battery.duty(Maths.clip(volts, 0, 12) / 12, RobotConfig.FLYWHEEL_MAX_POWER);
-        if (output <= 0.22 && next > 0.22) lastMotion = Maths.time();
+        // The lowest open-loop scan voltage may be below breakaway. Start timing at usable power.
+        boolean armWatchdog = next > 0.22 && (target > 0 || next * battery.volts() >= OPEN_LOOP_STALL_VOLTS - 1e-6);
+        if (armWatchdog && !stallWatchdogArmed) lastMotion = Maths.time();
+        stallWatchdogArmed = armWatchdog;
         output = next;
         m7.setPower(next);
         m8.setPower(next);
@@ -212,6 +222,7 @@ public final class Flywheel {
         HardwareStop.attempt(RobotConfig.FLYWHEEL_LEFT, () -> m7.setPower(0));
         HardwareStop.attempt(RobotConfig.FLYWHEEL_ENCODER_MOTOR, () -> m8.setPower(0));
         target = output = sampleDt = 0;
+        stallWatchdogArmed = false;
         coldStartedAt = Double.NaN;
         pid.reset();
     }
