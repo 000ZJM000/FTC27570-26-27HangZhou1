@@ -48,6 +48,11 @@ public final class RobotConfig {
     public static final double PINPOINT_FORWARD_MM = 83.0;
     public static final double TURRET_FORWARD_MM = -48.95762;
     public static final double TURRET_RIGHT_MM = 0;
+    public static final double SHOT_RELEASE_SECONDS = 0.080;
+    public static final double FLIGHT_NEAR_MM = 1000, FLIGHT_NEAR_SECONDS = 0.50;
+    public static final double FLIGHT_FAR_MM = 3500, FLIGHT_FAR_SECONDS = 0.90;
+    public static final double BRAKE_FORWARD_MM_S2 = 2800;
+    public static final double BRAKE_SIDE_MM_S2 = 2000;
     // X must count up forward and Y must count up left.
     public static final EncoderDirection X_POD_DIRECTION = EncoderDirection.REVERSED;
     public static final EncoderDirection Y_POD_DIRECTION = EncoderDirection.REVERSED;
@@ -65,7 +70,6 @@ public final class RobotConfig {
     public static final double SHOT_TURRET_STILL_RATE = 0.13;
     public static final double SHOT_TURRET_STILL_SECONDS = 0.10;
     public static final double FEED_POWER = 1.0;
-    public static final double FEED_POWER_PER_SECOND = 2.0;
     public static final double INTAKE_RAISE_SETTLE_SECONDS = 0.18;
 
     // Optional measured defaults. Flywheel calibration can fill in the encoder scale on the Hub.

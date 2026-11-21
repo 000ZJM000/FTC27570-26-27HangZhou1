@@ -22,6 +22,7 @@ public final class PinpointPose {
     private static final double POSITION_SLACK_MM = 45;
     private static final String POSITION_REANCHOR = "Pinpoint 位置需要重新对齐，回起点按 Y";
     private final GoBildaPinpointDriver device;
+    private final BatteryVoltage battery;
     private boolean started, anchored, positionAnchored, needsAnchor, positionNeedsAnchor, podsValid;
     private double sensorYaw, headingShift, localX, localY, originX, originY, fieldForward, fieldLeft;
     private double previousTime, previousX, previousY, lastHeadingTime = Double.NEGATIVE_INFINITY;
@@ -44,7 +45,12 @@ public final class PinpointPose {
     public int firmwareVersion;
 
     public PinpointPose(HardwareMap map) {
+        this(map, new BatteryVoltage(map));
+    }
+
+    public PinpointPose(HardwareMap map, BatteryVoltage battery) {
         device = map.tryGet(GoBildaPinpointDriver.class, RobotConfig.PINPOINT);
+        this.battery = battery;
     }
 
     public boolean startImu() {
@@ -89,6 +95,7 @@ public final class PinpointPose {
         }
         if (!started) return;
         double readStart = Maths.time();
+        battery.update(readStart);
         if (readStart < nextRead) return;
 
         try {
@@ -138,7 +145,9 @@ public final class PinpointPose {
     }
 
     private void failRead(String reason, double now) {
-        if (badReadStreak == 0) RobotLog.ww("BioBuzzPinpoint", "%s", reason);
+        if (badReadStreak == 0) {
+            RobotLog.ww("BioBuzzPinpoint", "%s V_bat=%.2f V measured=%b", reason, battery.volts(), battery.measured());
+        }
         badReads++;
         badReadStreak++;
         nextRead = now + readRetryDelay;
@@ -176,9 +185,10 @@ public final class PinpointPose {
             lastJumpSeconds = elapsed;
             lastJumpRate = rate;
             if (!headingRejected) {
-                RobotLog.ww("BioBuzzPinpoint", "Heading rejected: raw=%+.2f last=%+.2f delta=%+.2f gyro=%+.2f dt=%.0f ms",
+                RobotLog.ww("BioBuzzPinpoint",
+                        "Heading rejected: raw=%+.2f last=%+.2f delta=%+.2f gyro=%+.2f dt=%.0f ms V_bat=%.2f V measured=%b",
                         Math.toDegrees(observedYaw), Math.toDegrees(Maths.wrap(sensorYaw)), Math.toDegrees(delta),
-                        Math.toDegrees(rate), 1000 * elapsed);
+                        Math.toDegrees(rate), 1000 * elapsed, battery.volts(), battery.measured());
             }
             headingRejected = true;
             if (now - lastHeadingTime >= HEADING_GRACE) {
@@ -221,6 +231,10 @@ public final class PinpointPose {
                 positionJumps++;
                 lastPositionJumpMm = distance;
                 lastPositionJumpSeconds = elapsed;
+                if (!positionRejected) {
+                    RobotLog.ww("BioBuzzPinpoint", "Position rejected: delta=%.0f mm dt=%.0f ms V_bat=%.2f V measured=%b",
+                            distance, 1000 * elapsed, battery.volts(), battery.measured());
+                }
             }
             positionRejected = true;
             if (elapsed >= POSITION_GRACE) {

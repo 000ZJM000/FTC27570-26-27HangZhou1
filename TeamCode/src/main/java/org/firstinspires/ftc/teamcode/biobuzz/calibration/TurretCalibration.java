@@ -2,48 +2,91 @@ package org.firstinspires.ftc.teamcode.biobuzz.calibration;
 
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import org.firstinspires.ftc.teamcode.biobuzz.CalibrationStore;
+import org.firstinspires.ftc.teamcode.biobuzz.Drive;
 import org.firstinspires.ftc.teamcode.biobuzz.Maths;
+import org.firstinspires.ftc.teamcode.biobuzz.PinpointPose;
 import org.firstinspires.ftc.teamcode.biobuzz.RobotConfig;
 import org.firstinspires.ftc.teamcode.biobuzz.Turret;
+import org.firstinspires.ftc.teamcode.biobuzz.TurretPlant;
 
-@TeleOp(name = "02 自测云台 行程 摩擦 刹车模型", group = "BIOBUZZ 自测")
+@TeleOp(name = "02 云台全套 12V补偿·联动·PID", group = "BIOBUZZ 自测")
 public final class TurretCalibration extends CalibrationOp {
     private int homeTick;
+    private String geometry = "未测", plant = "未测", friction = "未测", coupling = "未测", pid = "未测";
+    private TurretPidTuning tuning;
 
-    @Override String intro() { return "先记行程，再做短脉冲快速辨识和停稳验证，通过后才精测全圈。"; }
+    @Override String intro() {
+        return "一次完成行程、12V 动力学与摩擦、底盘联动、云台 PID 及回转验收。";
+    }
 
     @Override void calibrate() throws InterruptedException {
-        Turret turret = new Turret(hardwareMap, store);
+        Turret turret = new Turret(hardwareMap, store, battery);
         try {
             turret.teachingMode(true);
             if (!confirm("把云台轻轻摆到最右端，停稳后 A。")) return;
             homeTick = turret.rawTicks();
-            boolean taught = false;
-            if (confirm("重测零位方向、正前和行程？已有标定可按 B 跳过。")) {
-                taught = teach(turret);
-                if (taught) turret = new Turret(hardwareMap, store);
-                else telemetry.log().add("本次几何数据无效，尝试沿用之前的标定。");
+            if (!turret.calibrated() || confirm("A 重测方向、正前和行程；B 沿用有效几何并继续电压校准。")) {
+                if (!teach(turret)) {
+                    geometry = "教学未完成";
+                    return;
+                }
+                geometry = "已重测";
+                turret = new Turret(hardwareMap, store, battery);
+            } else {
+                geometry = "沿用已保存";
             }
             if (!turret.calibrated() || !opModeIsActive()) {
                 telemetry.log().add("需要完成方向、正前方与限位标定才能自动上电。");
                 return;
             }
             turret.homeAtRight(homeTick);
-            if (!turret.plantIdentified() || confirm("现有刹车模型可沿用。A 重测，B 直接进入摩擦测量。")) {
-                if (!center(turret)) return;
-                while (!new TurretQuickIdentification(this, turret).run()) {
-                    if (!opModeIsActive() || motionAborted()
-                            || !confirm("快速基线未通过。A 回中后重试，B 结束。") || !center(turret)) return;
-                }
+            if (!center(turret)) return;
+            while (!new TurretQuickIdentification(this, turret).run()) {
+                plant = "未通过，保留上次值";
+                if (!opModeIsActive() || motionAborted()
+                        || !confirm("12V 动力学未通过。A 回中后重试，B 结束。") || !center(turret)) return;
             }
+            plant = "已保存";
+            if (!new TurretFrictionCalibration(this).run(turret)) {
+                friction = "未通过，保留上次值";
+                return;
+            }
+            friction = "已保存";
+
+            turret = new Turret(hardwareMap, store, battery);
+            turret.homeAtRight(homeTick);
             turret.teachingMode(false);
-            if (confirm("整段行程分 12 段，双向各测两次，样本不足才补测。按 A 开始。")) {
-                new TurretFrictionCalibration(this).run(turret);
+            if (!turret.encoderReady() || !turret.motorResponding()) return;
+            if (!confirm("轮子落地、清空周围并保持底盘静止。A 开始联动、PID 与回转，流程会自动前进。")) return;
+            PinpointPose pose = new PinpointPose(hardwareMap, battery);
+            if (!initializePinpoint(pose)) {
+                coupling = "Pinpoint 航向未就绪";
+                return;
             }
-            if (taught && !motionAborted()) verifyEncoderReturn(turret);
+            Drive drive = new Drive(hardwareMap);
+            try {
+                double[] startingGains = turret.pidGains();
+                TurretPlant model = TurretPlant.load(store);
+                turret.setPidGains(model.pidSeed(model.baseline()));
+                coupling = new TurretYawCalibration(this).run(drive, pose, turret)
+                        ? "双向验收并保存" : "未通过，沿用上次值";
+                if (!opModeIsActive() || motionAborted() || !turret.motorResponding()) return;
+                turret.setPidGains(startingGains);
+                tuning = new TurretPidTuning(this);
+                pid = tuning.tune(turret, drive, pose) ? "已验收并保存" : "未验收，沿用上次值";
+            } finally {
+                drive.stop();
+            }
+            if ("已重测".equals(geometry) && opModeIsActive() && !motionAborted()) verifyEncoderReturn(turret);
         } finally {
             turret.teachingMode(false);
         }
+    }
+
+    @Override void showResults() {
+        telemetry.addData("行程 / 12V 动力学 / 摩擦", "%s / %s / %s", geometry, plant, friction);
+        telemetry.addData("联动 / PID", "%s / %s", coupling, pid);
+        if (tuning != null) tuning.showResults();
     }
 
     private void verifyEncoderReturn(Turret turret) throws InterruptedException {
@@ -132,7 +175,7 @@ public final class TurretCalibration extends CalibrationOp {
 
     private boolean center(Turret turret) throws InterruptedException {
         turret.teachingMode(true);
-        while (confirm("将云台移到行程中间，停稳后 A。", () -> {
+        while (confirm("将云台移到行程中间并移开手。A 连续测 12V 短脉冲、刹车和六点摩擦。", () -> {
             turret.sample(0.025);
             telemetry.addData("行程比例", "%.0f%%", 100 * turret.angle / turret.span());
         })) {

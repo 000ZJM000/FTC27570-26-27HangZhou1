@@ -5,11 +5,15 @@ import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.Gamepad;
 import com.qualcomm.robotcore.hardware.Servo;
 import java.util.List;
+import org.firstinspires.ftc.teamcode.biobuzz.BatteryVoltage;
+import org.firstinspires.ftc.teamcode.biobuzz.CalibratedShotMap;
 import org.firstinspires.ftc.teamcode.biobuzz.CalibrationStore;
+import org.firstinspires.ftc.teamcode.biobuzz.ControlLoop;
 import org.firstinspires.ftc.teamcode.biobuzz.Flywheel;
 import org.firstinspires.ftc.teamcode.biobuzz.Intake;
 import org.firstinspires.ftc.teamcode.biobuzz.Maths;
 import org.firstinspires.ftc.teamcode.biobuzz.RobotConfig;
+import org.firstinspires.ftc.teamcode.biobuzz.ShotRecords;
 import org.firstinspires.ftc.teamcode.biobuzz.ShotVectorField;
 import org.firstinspires.ftc.teamcode.biobuzz.Turret;
 
@@ -24,6 +28,12 @@ public final class ShotFieldCalibration extends LinearOpMode {
     private Turret turret;
     private Flywheel flywheel;
     private Intake intake;
+    private CalibrationStore store;
+    private BatteryVoltage battery;
+    private Servo pitch;
+    private boolean rightHalf;
+    private double trialVoltage, trialPitch;
+    private double previewAngle = Double.NaN, previewUntil;
     private ShotVectorField field;
     private boolean brake;
     private int column, row;
@@ -36,16 +46,16 @@ public final class ShotFieldCalibration extends LinearOpMode {
     private String status = "选格、摆位、调速后扣 RT";
 
     @Override public void runOpMode() {
-        CalibrationStore store = new CalibrationStore(hardwareMap.appContext);
-        try {
-            turret = new Turret(hardwareMap, store);
-            flywheel = new Flywheel(hardwareMap, store);
+        store = new CalibrationStore(hardwareMap.appContext);
+        battery = new BatteryVoltage(hardwareMap);
+        try (ControlLoop loop = new ControlLoop(hardwareMap)) {
+            turret = new Turret(hardwareMap, store, battery);
+            flywheel = new Flywheel(hardwareMap, store, battery);
             intake = new Intake(hardwareMap);
-            Servo pitch = hardwareMap.tryGet(Servo.class, RobotConfig.PITCH_SERVO);
+            pitch = hardwareMap.tryGet(Servo.class, RobotConfig.PITCH_SERVO);
             if (pitch != null) pitch.setPosition(RobotConfig.ST_HOME);
 
             turret.teachingMode(true);
-            boolean rightHalf = false;
             telemetry.setMsTransmissionInterval(150);
             while (opModeInInit()) {
                 if (gamepad1.dpad_left) rightHalf = false;
@@ -59,11 +69,13 @@ public final class ShotFieldCalibration extends LinearOpMode {
                 sleep(20);
             }
             if (!opModeIsActive()) return;
+            loop.beginFrame();
             if (turret.calibrated()) turret.homeAtRight();
             field = new ShotVectorField(store, rightHalf);
+            ShotRecords.export(store);
             maxRpm = flywheel.maxTargetRpm();
             targetRpm = Math.min(RobotConfig.FLYWHEEL_TARGET_RPM, maxRpm);
-            runCalibration();
+            runCalibration(loop);
         } finally {
             try {
                 stopFeed();
@@ -73,21 +85,22 @@ public final class ShotFieldCalibration extends LinearOpMode {
         }
     }
 
-    private void runCalibration() {
+    private void runCalibration(ControlLoop loop) {
         Gamepad previous = new Gamepad();
         Gamepad current = new Gamepad();
         previous.copy(gamepad1);
         double lastTime = Maths.time(), nextDisplay = lastTime;
         while (opModeIsActive()) {
+            double now = loop.beginFrame();
             current.copy(gamepad1);
-            double now = Maths.time();
             double dt = Maths.clip(now - lastTime, 0.005, 0.25);
             lastTime = now;
             turret.sample(dt);
             flywheel.sample();
             if (isStopRequested()) break;
             handleControls(current, previous, now);
-            updateTrial(now, dt);
+            updatePreview(now, dt);
+            updateTrial(now);
             if (now >= nextDisplay) {
                 showCalibration();
                 nextDisplay = now + 0.15;
@@ -95,16 +108,31 @@ public final class ShotFieldCalibration extends LinearOpMode {
             Gamepad swap = previous;
             previous = current;
             current = swap;
-            sleep(15);
+            long remaining = loop.remainingMillis(now);
+            if (remaining > 0) sleep(remaining);
         }
     }
 
     private void handleControls(Gamepad current, Gamepad previous, double now) {
         if (current.b) {
             if (state != TrialState.IDLE) endTrial("试射已取消");
+            if (Double.isFinite(previewAngle)) endPreview("预瞄已取消");
             return;
         }
         if (state != TrialState.IDLE) return;
+        if (Double.isFinite(previewAngle)) return;
+        if (current.start && current.y && !(previous.start && previous.y)) {
+            if (store.clearLegacyShotPoints()) {
+                ShotVectorField.Refinement selected = selectedRefinement();
+                field = new ShotVectorField(store, rightHalf);
+                if (selected != null) {
+                    refinements = field.refinements();
+                    pending = null;
+                }
+                status = ShotRecords.export(store) ? "两半场旧 v1 精测已清空" : "已清空，JSON 导出失败";
+            } else status = "旧精测清空失败";
+            return;
+        }
 
         if (current.back && !previous.back) {
             toggleRefinements();
@@ -141,15 +169,21 @@ public final class ShotFieldCalibration extends LinearOpMode {
             if (saved) {
                 pending = null;
                 status = unreachable ? "已标为不可达" : "已解除不可达标记";
+                if (!ShotRecords.export(store)) status += "，JSON 导出失败";
             } else status = "保存不可达状态失败，请重试";
             return;
         }
         if (current.a && !previous.a) {
             if (pending == null) status = "请先在当前点完成一次试射";
-            else if (point == null ? field.save(column, row, pending) : field.save(point, pending)) {
+            else if (point == null ? field.save(column, row, pending, trialVoltage, trialPitch)
+                    : field.save(point, pending, trialVoltage, trialPitch)) {
                 pending = null;
-                status = "已保存当前点向量";
+                status = ShotRecords.export(store) ? "已保存当前点向量及 JSON" : "向量已保存，JSON 导出失败";
             } else status = "保存向量失败，请重试";
+            return;
+        }
+        if (current.right_stick_button && !previous.right_stick_button) {
+            startPreview(point, now);
             return;
         }
         if (current.right_trigger > TRIGGER_THRESHOLD && previous.right_trigger <= TRIGGER_THRESHOLD) {
@@ -163,6 +197,43 @@ public final class ShotFieldCalibration extends LinearOpMode {
             state = TrialState.SPINNING_UP;
             deadline = now + SPIN_UP_TIMEOUT;
         }
+    }
+
+    private void startPreview(ShotVectorField.Refinement point, double now) {
+        if (!turret.calibrated() || !turret.encoderReady() || !turret.motorResponding()) {
+            status = "云台反馈未就绪";
+            return;
+        }
+        double x = point == null ? field.centerRightTiles(column) : point.rightTiles;
+        double y = point == null ? field.centerForwardTiles(row) : point.forwardTiles;
+        CalibratedShotMap model = new CalibratedShotMap(store);
+        ShotVectorField.Vector guess = model.preview(x, y);
+        double bearing = guess != null ? guess.bearing()
+                : org.firstinspires.ftc.teamcode.biobuzz.FieldTargets.fromPose(
+                        y * RobotConfig.TILE_MM, -x * RobotConfig.TILE_MM, 0).bearing;
+        previewAngle = turret.previewAngle(bearing);
+        if (!Double.isFinite(previewAngle)) {
+            status = "预瞄目标超出云台安全行程";
+            return;
+        }
+        setBrake(true);
+        previewUntil = now + 3.5;
+        status = "云台预瞄中，B 取消";
+    }
+
+    private void updatePreview(double now, double dt) {
+        if (!Double.isFinite(previewAngle)) return;
+        if (now >= previewUntil || !turret.encoderReady() || !turret.motorResponding()) {
+            endPreview("预瞄未到位，可手动微调");
+        } else if (Math.abs(turret.angle - previewAngle) <= Math.toRadians(1.5) && turret.stableForShot()) {
+            endPreview("预瞄完成，按 X 松刹车微调");
+        } else turret.control(previewAngle, 0, dt);
+    }
+
+    private void endPreview(String message) {
+        turret.stop();
+        previewAngle = Double.NaN;
+        status = message;
     }
 
     private void toggleRefinements() {
@@ -213,7 +284,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
         return point == null ? field.isUnreachable(column, row) : field.isUnreachable(point);
     }
 
-    private void updateTrial(double now, double dt) {
+    private void updateTrial(double now) {
         if (state == TrialState.IDLE) return;
         String blocked = shotBlocker();
         if (blocked != null) {
@@ -226,8 +297,10 @@ public final class ShotFieldCalibration extends LinearOpMode {
                 endTrial("等待云台停稳或飞轮到速超时，请再试");
                 return;
             }
-            if (!turret.stableForShot() || !flywheel.readyForShot()) return;
+            if (!turret.stableForShot() || !flywheel.readyForShot() || !intake.readyToFeed()) return;
             trial = ShotVectorField.Vector.fromShot(turret.boreRelative(), targetRpm);
+            trialVoltage = battery.measured() ? battery.volts() : -1;
+            trialPitch = pitch != null ? pitch.getPosition() : -1;
             state = TrialState.FEEDING;
             deadline = now + FEED_SECONDS;
         }
@@ -239,7 +312,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
             pending = trial;
             endTrial("供弹结束，确认命中后按 A 保存");
         } else if (flywheel.feed(true)) {
-            intake.set(false, true, false, dt);
+            intake.set(false, true, false);
         } else {
             endTrial("供弹未放行");
         }
@@ -275,7 +348,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
         try {
             if (flywheel != null) flywheel.stop();
         } finally {
-            if (intake != null) intake.set(false, false, false, 0);
+            if (intake != null) intake.stop();
         }
     }
 
@@ -305,6 +378,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
         telemetry.addLine(point == null ? "方向键选格 | Back 四角精测" : "方向键左/右换角 | Back 回格心");
         telemetry.addLine("LB/RB −/+" + RPM_STEP + " RPM | X 刹车/松开");
         telemetry.addLine("RT 单次试射 | A 保存试射 | Y 不可达/恢复 | B 取消试射");
+        telemetry.addLine("R3 预瞄 | START + Y 清空旧 v1 精测");
         telemetry.update();
     }
 

@@ -8,13 +8,15 @@
   const signed = (value, digits = 1) => Number.isFinite(value) ? (value > 0 ? "+" : "") + value.toFixed(digits) : "—";
   const pointKey = point => point.id + "@" + point.x + "," + point.y;
   const storageKey = "biobuzz-shot-fit-workbench-v1";
-  const initial = fit.parse(globalThis.initialShotRecords);
+  const initialGeometry = globalThis.initialShotGeometry;
+  const initial = fit.parse(globalThis.initialShotRecords, initialGeometry);
   const field = byId("field");
   const anglePlot = byId("angle-profile");
   const rpmPlot = byId("rpm-profile");
   const query = { x: 0.5, y: 2.5 };
   let points = initial.points;
   let settings = { ...fit.defaults };
+  let geometry = initialGeometry;
   let selected = null;
   let model, stats, rpmLow, rpmHigh, fitFrame, fieldBounds;
   let blockedTiles = new Set();
@@ -32,12 +34,13 @@
   }
 
   function applyProject(project) {
-    if (project?.version !== 1 || !Array.isArray(project.points) || !project.points.length ||
+    if (![1, 2].includes(project?.version) || !Array.isArray(project.points) ||
         project.points.length > 1200 || !project.points.every(fit.validPoint)) {
       throw new Error("方案中缺少有效的 06 测点。");
     }
     points = project.points.map(point => ({ ...point, blocked: Boolean(point.blocked), inactive: Boolean(point.inactive) }));
     settings = checkedSettings(project.settings || {});
+    geometry = fit.checkedGeometry(project.geometry || initialGeometry);
     selected = null;
   }
 
@@ -76,13 +79,19 @@
     if (!model) return "至少需要一个参与拟合的实测点。";
     const [right, forward] = model.goal;
     const trim = value => value === 0 ? "" : value > 0 ? " + " + value : " − " + Math.abs(value);
-    return "θ = atan2(x − " + format(right, 5) + ", " + format(forward, 5) + " − y) × 180/π + P" +
+    const [x0, sx] = model.angular.x, [y0, sy] = model.angular.y;
+    const [r0, sr] = model.speed.radius;
+    const radial = model.speed.coefficients.map((value, i) =>
+      (value < 0 ? " − " : i > 0 ? " + " : "") + format(Math.abs(value), 3) + (i === 0 ? "" : i === 1 ? "d" : "d^" + i)).join("");
+    return "θ = s × (atan2(x − " + format(right, 5) + ", " + format(forward, 5) + " − y) × 180/π + P)" +
       trim(settings.angleTrim) + "\nP = " + polynomial(model.angular) +
-      "\nRPM = " + polynomial(model.speed) + trim(settings.rpmTrim);
+      "\nu = (x − " + format(x0, 4) + ")/" + format(sx, 4) + ", v = (y − " + format(y0, 4) + ")/" + format(sy, 4) +
+      "\nRPM = " + radial + trim(settings.rpmTrim) +
+      "\nd = (到目标的距离 − " + format(r0, 4) + ")/" + format(sr, 4);
   }
 
   function updateFit(persist = false) {
-    model = fit.fit(points, settings);
+    model = fit.fit(points, settings, geometry);
     stats = fit.diagnostics(points, model, settings);
     const measuredRpm = points.filter(fit.usable).map(point => point.rpm);
     rpmLow = measuredRpm.length ? Math.min(...measuredRpm) : 2900;
@@ -109,7 +118,7 @@
     renderSelection();
     draw();
     if (persist) {
-      try { localStorage.setItem(storageKey, JSON.stringify({ version: 1, points, settings })); } catch { /* file export is still available */ }
+      try { localStorage.setItem(storageKey, JSON.stringify({ version: 2, points, settings, geometry })); } catch { /* file export is still available */ }
     }
   }
 
@@ -452,11 +461,15 @@
     else setQuery((mx - left) / unit, (top + size - my) / unit);
   });
   byId("csv").addEventListener("click", saveCsv);
-  byId("save").addEventListener("click", () => download("06-fit-project.json",
-    JSON.stringify({ version: 1, points, settings, model, equation: equationText(), stats }, null, 2), "application/json"));
+  byId("save").addEventListener("click", () => {
+    if (!model) return message("至少需要一个参与拟合的实测点。");
+    download("shot_model.json", JSON.stringify({
+      version: 2, kind: "biobuzz-shot-model", points, settings, geometry, model, equation: equationText(), stats
+    }, null, 2), "application/json");
+  });
   byId("copy-equations").addEventListener("click", async () => {
-    const text = "u = x − 0.5, v = (y − 3)/3\n" + equationText() +
-      "\n右半场先用 x → 6 − x，再反转射向。";
+    const text = equationText() +
+      "\nx/y 为云台转轴坐标。右半场先用 x → 6 − x，再令 s = −1；左半场 s = 1。u、v、d 限于 ±3。";
     try {
       await navigator.clipboard.writeText(text);
       message("方程已复制。");
@@ -486,7 +499,7 @@
       if (text.startsWith("{")) {
         applyProject(JSON.parse(text)); count = points.length;
       } else {
-        const parsed = fit.parse(text);
+        const parsed = fit.parse(text, geometry);
         if (parsed.errors.length) throw new Error("这些点位无法识别 " + parsed.errors.slice(0, 4).join("、"));
         if (!parsed.points.length) throw new Error("请粘贴至少一条 07 点位，例如 110:-4675/3100。");
         const merged = new Map(points.map(point => [pointKey(point), point]));

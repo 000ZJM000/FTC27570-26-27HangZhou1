@@ -8,26 +8,34 @@ import com.qualcomm.robotcore.hardware.HardwareMap;
 public final class Turret {
     private static final double OUTPUT_LIMIT = RobotConfig.TURRET_MAX_POWER;
     private final DcMotorEx motor, encoder;
+    private final BatteryVoltage battery;
     private final double[] geometry;
     private TurretFriction friction;
     private TurretPlant plant;
     private double[] coupling;
     private final TurretRange range;
     private final boolean savedPid;
+    private final double shotAimTolerance;
     private final TurretObserver observer = new TurretObserver();
     private Pid pid;
     private double[] gains;
-    private double appliedPower, brakeDuty, controlTarget;
+    private double appliedPower, actualDuty, brakeDuty, controlTarget;
     private boolean holding;
-    private int homeTick, lastTick, previousGoal, trackedGoal;
+    private int homeTick, lastTick, trackedGoal;
+    private Integer initTick;
     private boolean homed, encoderFresh, fieldTracking, motorResponding = true;
-    private double encoderAge, goalRate, previousGoalBearing, lastPower;
+    private double encoderAge, lastPower;
     private double stillSeconds;
     private double previousCoupledRate, coupledAcceleration, filteredStick;
     private double worldBearing = Double.NaN, localHold = Double.NaN;
     public double angle, speed, target, worldError;
 
     public Turret(HardwareMap map, CalibrationStore store) {
+        this(map, store, new BatteryVoltage(map));
+    }
+
+    public Turret(HardwareMap map, CalibrationStore store, BatteryVoltage battery) {
+        this.battery = battery;
         motor = map.get(DcMotorEx.class, RobotConfig.TURRET_MOTOR);
         encoder = map.get(DcMotorEx.class, RobotConfig.TURRET_ENCODER);
         // Configure only the turret motor. The drive motor on the encoder port keeps its configuration.
@@ -44,6 +52,10 @@ public final class Turret {
         savedPid = stored != null && stored[0] >= 0 && stored[1] >= 0 && stored[2] >= 0
                 && (stored[0] > 0 || stored[1] > 0 || stored[2] > 0);
         setPidGains(savedPid ? stored : plant.pidSeed(plant.baseline()));
+        double steadyError = savedPid ? store.read(CalibrationStore.TURRET_PID_STEADY_ERROR, -1)[0] : -1;
+        shotAimTolerance = steadyError >= 0
+                ? Maths.clip(1.35 * steadyError + Math.toRadians(0.5), Math.toRadians(2), Math.toRadians(6))
+                : Math.toRadians(3);
     }
 
     public void installPlant(TurretPlant model) {
@@ -89,8 +101,25 @@ public final class Turret {
 
     public boolean isHomed() { return homed; }
     public boolean encoderReady() { return homed && encoderFresh; }
+    boolean encoderFault() { return calibrated() && (!homed || encoderAge >= 0.10); }
     public boolean motorResponding() { return motorResponding; }
     public double boreRelative() { return Maths.wrap(angle - geometry[3]); }
+
+    public double previewAngle(double bearing) {
+        double next = bearing + geometry[3];
+        next += Maths.TURN * Math.ceil((RobotConfig.TURRET_MARGIN - next) / Maths.TURN);
+        return next <= span() - RobotConfig.TURRET_MARGIN ? next : Double.NaN;
+    }
+
+    double initRelativeAngle() {
+        try {
+            int ticks = rawTicks();
+            if (initTick == null) initTick = ticks;
+            return geometry[0] * (ticks - initTick) / RobotConfig.TICKS_PER_TURRET_RADIAN;
+        } catch (RuntimeException unavailable) {
+            return Double.NaN;
+        }
+    }
 
     public void homeAtRight() {
         try {
@@ -121,6 +150,7 @@ public final class Turret {
     }
 
     public void sample(double dt) {
+        battery.update(Maths.time());
         if (!homed) return;
         double wasStillFor = stillSeconds;
         stillSeconds = 0;
@@ -153,10 +183,11 @@ public final class Turret {
 
     public void aim(PinpointPose pose, FieldTargets goal, double stick, double dt) {
         boolean hasGoal = goal != null && goal.distanceMm >= 0.1;
-        aim(pose, hasGoal ? goal.goal : 0, hasGoal ? goal.bearing : 0, stick, dt);
+        aim(pose, hasGoal ? goal.goal : 0, hasGoal ? goal.bearing : 0,
+                hasGoal ? new ShotMotion(pose).lineRate(goal.rightTiles, goal.forwardTiles) : 0, 0, stick, dt);
     }
 
-    void aim(PinpointPose pose, int goalNumber, double bearing, double stick, double dt) {
+    void aim(PinpointPose pose, int goalNumber, double bearing, double lineRate, double yawTrim, double stick, double dt) {
         if (!calibrated() || !homed) {
             stop();
             return;
@@ -169,8 +200,6 @@ public final class Turret {
                 pid.reset();
                 holding = false;
             }
-            previousGoal = 0;
-            goalRate = 0;
             previousCoupledRate = coupledAcceleration = filteredStick = 0;
             target = localHold;
             control(localHold, 0, dt);
@@ -178,10 +207,10 @@ public final class Turret {
         }
         localHold = Double.NaN;
         double actualBearing = pose.heading + boreRelative();
-        if (!Double.isFinite(worldBearing)) worldBearing = actualBearing;
+        if (!Double.isFinite(worldBearing)) worldBearing = actualBearing - yawTrim;
 
         // Stage 1: keep the previous world bearing while the drivetrain turns.
-        double stabilized = worldBearing - pose.heading + geometry[3];
+        double stabilized = worldBearing + yawTrim - pose.heading + geometry[3];
         // Stage 2: update the desired bearing when a target is defined.
         if (goalNumber != 0 && trackedGoal != goalNumber) {
             trackedGoal = goalNumber;
@@ -190,13 +219,13 @@ public final class Turret {
         }
         double correction = goalNumber == 0 ? 0 : Maths.wrap(bearing - worldBearing);
         worldBearing = Maths.wrap(worldBearing + correction);
-        updateGoalRate(bearing, goalNumber, dt);
+        double goalRate = goalNumber == 0 ? 0 : Maths.clip(lineRate, -5, 5);
         double relativeRate = goalRate - pose.yawRate;
         int toward = relativeRate >= 0 ? 1 : -1;
         double lookahead = Maths.clip(0.23 + plant.delay(toward), 0.24, 0.36);
         boolean wasRewinding = range.rewinding;
-        target = range.target(stabilized + correction, angle, relativeRate, lookahead);
-        worldError = Maths.wrap(worldBearing - actualBearing);
+        target = range.target(stabilized + correction + goalRate * plant.delay(toward), angle, relativeRate, lookahead);
+        worldError = Maths.wrap(worldBearing + yawTrim - actualBearing);
         if (range.rewinding != wasRewinding) {
             pid.reset();
             holding = false;
@@ -220,18 +249,11 @@ public final class Turret {
         }
     }
 
-    private void updateGoalRate(double bearing, int goalNumber, double dt) {
-        if (goalNumber != 0 && previousGoal == goalNumber) {
-            double rate = Maths.clip(Maths.wrap(bearing - previousGoalBearing) / dt, -5, 5);
-            goalRate += dt / (0.06 + dt) * (rate - goalRate);
-        } else goalRate = 0;
-        previousGoal = goalNumber;
-        if (goalNumber != 0) previousGoalBearing = bearing;
+    public boolean aimReady() {
+        return aimReady(shotAimTolerance);
     }
 
-    public boolean aimReady() {
-        return aimReady(RobotConfig.SHOT_AIM_TOLERANCE);
-    }
+    double shotAimTolerance() { return shotAimTolerance; }
 
     boolean aimReady(double tolerance) {
         return calibrated() && encoderReady() && motorResponding && fieldTracking && range.reachable && !range.rewinding
@@ -245,7 +267,10 @@ public final class Turret {
     public boolean rewinding() { return range.rewinding; }
     public boolean rewindPredicted() { return range.rewinding && range.predicted; }
     public boolean targetReachable() { return range.reachable; }
-    public double output() { return lastPower; }
+    /** Delivered voltage as a fraction of 12 V, in the logical motor direction. */
+    public double output() { return appliedPower; }
+    public double actualDuty() { return actualDuty; }
+    public double observerBias() { return observer.bias; }
     public double brakeDuty() { return brakeDuty; }
     double controlTarget() { return controlTarget; }
 
@@ -294,20 +319,19 @@ public final class Turret {
         }
         feedforward += Maths.clip(velocityCorrection + (fittedKv > 0 ? fittedKv : referenceKv) * anticipatedRate
                 + fittedKa * chassisAcceleration, -0.50, 0.50);
-        double disturbance = Maths.clip(Math.abs(speed) / 0.45, 0, 1) * observer.bias;
         // Feed the real limits into the only PID so its integrator also respects the duty slew.
         double low = -powerLimit(-1), high = powerLimit(1);
         double lower = Maths.clip(appliedPower - 8.0 * dt, low, high);
         double upper = Maths.clip(appliedPower + 8.0 * dt, low, high);
-        power(pid.update(error, rateError, feedforward - disturbance, dt, lower, upper,
+        power(pid.update(error, rateError, feedforward, dt, lower, upper,
                 Math.abs(brakeDuty) < 0.045));
     }
 
     // Positive power always moves left after the geometry test. Refuse outward commands near an end.
     public void power(double logicalPower) {
         lastPower = Maths.clip(logicalPower, -powerLimit(-1), powerLimit(1));
-        writePower(lastPower * geometry[1]);
-        if (motorResponding) appliedPower = lastPower;
+        writePower(battery.duty(lastPower, OUTPUT_LIMIT) * geometry[1]);
+        if (motorResponding) appliedPower = battery.nominal(actualDuty * geometry[1]);
     }
 
     double powerLimit(int direction) {
@@ -316,10 +340,11 @@ public final class Turret {
         double horizon = Maths.clip(0.5 * plant.timeConstant(direction) + plant.delay(direction), 0.08, 0.30);
         double stoppingAllowance = Math.max(0, direction * speed) * horizon;
         double usable = remaining - RobotConfig.TURRET_MARGIN - stoppingAllowance;
-        double taper = OUTPUT_LIMIT * Maths.clip(usable / Math.toRadians(12), 0, 1);
+        double available = Math.min(OUTPUT_LIMIT, battery.nominal(OUTPUT_LIMIT));
+        double taper = available * Maths.clip(usable / Math.toRadians(12), 0, 1);
         // Leave enough duty to break static friction before the target tolerance.
         // Both envelopes reach zero at the same stopping boundary.
-        double breakaway = Math.min(OUTPUT_LIMIT, frictionDuty(angle, direction, 0) + 0.035);
+        double breakaway = Math.min(available, frictionDuty(angle, direction, 0) + 0.035);
         double limit = Math.max(taper, breakaway * Maths.clip(usable / RobotConfig.SHOT_AIM_TOLERANCE, 0, 1));
         return encoderFresh ? limit : Math.min(limit, 0.15);
     }
@@ -334,12 +359,14 @@ public final class Turret {
     }
 
     public void motorPulse(double power) {
-        writePower(Maths.clip(power, -0.22, 0.22));
+        battery.update(Maths.time());
+        writePower(battery.duty(Maths.clip(power, -0.22, 0.22), OUTPUT_LIMIT));
     }
 
     private void writePower(double power) {
         try {
             motor.setPower(power);
+            actualDuty = power;
             motorResponding = true;
         } catch (RuntimeException unavailable) {
             motorResponding = false;
@@ -354,8 +381,7 @@ public final class Turret {
         worldBearing = Double.NaN;
         localHold = Double.NaN;
         fieldTracking = false;
-        previousGoal = trackedGoal = 0;
-        goalRate = 0;
+        trackedGoal = 0;
         previousCoupledRate = coupledAcceleration = filteredStick = 0;
         range.reset();
         holding = false;

@@ -1,22 +1,29 @@
 package org.firstinspires.ftc.teamcode.biobuzz.calibration;
 
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import org.firstinspires.ftc.teamcode.biobuzz.BatteryVoltage;
 import org.firstinspires.ftc.teamcode.biobuzz.CalibrationStore;
+import org.firstinspires.ftc.teamcode.biobuzz.ControlLoop;
 import org.firstinspires.ftc.teamcode.biobuzz.Maths;
+import org.firstinspires.ftc.teamcode.biobuzz.PinpointPose;
 import org.firstinspires.ftc.teamcode.biobuzz.RearStatusLed;
 
 abstract class CalibrationOp extends LinearOpMode {
     CalibrationStore store;
+    BatteryVoltage battery;
     private boolean motionAborted;
+    double motionDeadline = Double.POSITIVE_INFINITY;
     private double nextDisplay;
     private RearStatusLed lights;
 
     @Override public final void runOpMode() throws InterruptedException {
         store = new CalibrationStore(hardwareMap.appContext);
+        battery = new BatteryVoltage(hardwareMap);
         lights = RearStatusLed.open(hardwareMap);
         try {
             lights.show(RearStatusLed.State.INIT);
             telemetry.addLine(intro());
+            showVoltage();
             telemetry.addLine("START 进入自测。A 确认，B 跳过/停止当前动作。");
             if (!lights.configured()) telemetry.addData("尾灯", "未配置 LED");
             telemetry.update();
@@ -34,6 +41,7 @@ abstract class CalibrationOp extends LinearOpMode {
             }
             while (opModeIsActive()) {
                 telemetry.addLine("本轮结束。请查看日志，再按 STOP。");
+                showVoltage();
                 showResults();
                 telemetry.update();
                 sleep(100);
@@ -57,6 +65,7 @@ abstract class CalibrationOp extends LinearOpMode {
         while (opModeIsActive()) {
             telemetry.addLine(instructions);
             telemetry.addLine("A 确认 / B 跳过");
+            showVoltage();
             display.run();
             telemetry.update();
             if (gamepad1.b) return false;
@@ -94,21 +103,41 @@ abstract class CalibrationOp extends LinearOpMode {
 
     boolean runFor(double duration, Tick task) throws InterruptedException {
         if (opModeIsActive() && !motionAborted()) lights.show(RearStatusLed.State.CAL_RUNNING);
-        double start = Maths.time(), previous = start - 0.02;
-        while (opModeIsActive() && !motionAborted()) {
-            double now = Maths.time(), elapsed = now - start;
-            if (elapsed >= duration) return true;
-            if (!task.step(elapsed, Maths.clip(now - previous, 0.005, 0.25))) return false;
-            previous = now;
-            sleep(20);
+        try (ControlLoop loop = new ControlLoop(hardwareMap)) {
+            double start = Maths.time(), previous = start - ControlLoop.PERIOD;
+            while (opModeIsActive() && !motionAborted()) {
+                double now = loop.beginFrame(), elapsed = now - start;
+                if (elapsed >= duration) return true;
+                battery.update(now);
+                if (!battery.measured()) {
+                    telemetry.log().add("电池电压读数缺失，停止本轮 12V 测量。");
+                    motionAborted = true;
+                    return false;
+                }
+                if (!task.step(elapsed, Maths.clip(now - previous, 0.005, 0.25))) return false;
+                previous = now;
+                long remaining = loop.remainingMillis(now);
+                if (remaining > 0) sleep(remaining);
+            }
         }
         return false;
     }
 
+    boolean initializePinpoint(PinpointPose pose) throws InterruptedException {
+        if (!pose.startImu()) return false;
+        runFor(2.0, (time, dt) -> {
+            pose.update();
+            return !pose.headingValid;
+        });
+        return opModeIsActive() && !motionAborted() && pose.headingValid;
+    }
+
     boolean motionAborted() {
-        motionAborted |= gamepad1.b;
+        motionAborted |= gamepad1.b || Maths.time() >= motionDeadline;
         return motionAborted;
     }
+
+    boolean motionWasAborted() { return motionAborted; }
 
     boolean save(String key, double... values) {
         boolean saved = store.save(key, values);
@@ -122,7 +151,14 @@ abstract class CalibrationOp extends LinearOpMode {
         nextDisplay = now + 0.10;
         telemetry.addLine(task);
         telemetry.addData("测量", format, values);
+        showVoltage();
         telemetry.addLine("B 停止当前动作");
         telemetry.update();
+    }
+
+    private void showVoltage() {
+        battery.update(Maths.time());
+        if (battery.measured()) telemetry.addData("12V 电压补偿", "实测 %.2f V / 标称 12.00 V", battery.volts());
+        else telemetry.addData("12V 电压补偿", "等待电池读数，标称 12.00 V");
     }
 }

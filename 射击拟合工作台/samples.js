@@ -1,3 +1,8 @@
+// Geometry of these historical 07 captures. Robot JSON exports supply their own geometry.
+globalThis.initialShotGeometry = {
+  tileMm: 609.6, turretRightMm: 0, turretForwardMm: -48.95762,
+  leftEdgeMm: 219.3, rightEdgeMm: 219.3, rearEdgeMm: 177.47468, frontEdgeMm: 263
+};
 // Driver Station 07, 35 records across two screenshots.
 globalThis.initialShotRecords = `
 110:-4675/3100 111:-4232/3200 112:-3859/3150

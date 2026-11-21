@@ -2,107 +2,54 @@ package org.firstinspires.ftc.teamcode.biobuzz.calibration;
 
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.DcMotorSimple.Direction;
+import org.firstinspires.ftc.teamcode.biobuzz.BatteryVoltage;
 import org.firstinspires.ftc.teamcode.biobuzz.CalibrationStore;
 import org.firstinspires.ftc.teamcode.biobuzz.Flywheel;
-import org.firstinspires.ftc.teamcode.biobuzz.Maths;
+import org.firstinspires.ftc.teamcode.biobuzz.Intake;
+import org.firstinspires.ftc.teamcode.biobuzz.LeastSquares;
 import org.firstinspires.ftc.teamcode.biobuzz.RobotConfig;
 
-import java.util.Arrays;
-import java.util.Locale;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.IntSupplier;
 
-@TeleOp(name = "04 自测飞轮 转速和 PID", group = "BIOBUZZ 自测")
+@TeleOp(name = "04 飞轮全套 12V补偿·前馈·PID", group = "BIOBUZZ 自测")
 public final class FlywheelCalibration extends CalibrationOp {
-    private static final double PID_HOLD = 0.25;
-    private static final double MIN_STEP_DURATION = 4.5;
-    private static final int RANGE_POINTS = 7;
-    private static final double REFERENCE_POWER = 0.70;
-    private static final double FULL_POWER = RobotConfig.FLYWHEEL_MAX_POWER;
-    private static final double[] POWER_LEVELS = {
-            0.10, 0.14, 0.18, 0.22, 0.26, 0.32, 0.38, 0.44, 0.50, 0.56, 0.63,
-            REFERENCE_POWER, 0.77, 0.84, 0.90, RobotConfig.FLYWHEEL_TARGET_MAX_DUTY, FULL_POWER
-    };
-    private int trials;
-    private BayesianPidSearch completed;
-    private double fullPowerSpeed, fullPowerRpm, peakPidPower;
-    private String outcome;
+    private static final double[] VOLTAGE_LEVELS = {3.0, 4.5, 6.0, 7.5, 9.0, 10.5, 12.0};
+    private final List<String> recoveries = new ArrayList<>();
+    private double curveLimit;
+    private FlywheelPidCalibration pidCalibration;
 
     @Override String intro() {
-        return "清空仓内和进弹通道，移开飞轮周围物品。自测中 SB 保持关闭。";
+        return "一次完成方向、每转计数、12V 前馈曲线、空载 PID 拟合与留出复测。最后可选三球回速。";
     }
 
     @Override void calibrate() throws InterruptedException {
-        Flywheel wheel = new Flywheel(hardwareMap, store);
+        Flywheel wheel = new Flywheel(hardwareMap, store, battery);
         try {
-            Flywheel currentWheel = wheel;
-            if (confirm("先识别出球方向。A 手转识别，B 沿用当前转向。", () ->
-                    telemetry.addData("m-7 / m-8 当前转向", "%s / %s",
-                            currentWheel.leftDirection(), currentWheel.encoderDirection()))) {
+            if (confirm("A 从手转识别开始全套校准。B 沿用已有方向、每转计数和前馈，直接重测 PID。")) {
                 if (!calibrateDirection(wheel)) return;
-                wheel = new Flywheel(hardwareMap, store);
-            }
-            if (!opModeIsActive()) return;
-            if (confirm(wheel.ticksPerRev > 0
-                    ? "A 重测每转计数，B 沿用已有 RPM 比例。"
-                    : "标定实际 RPM？在飞轮上标记起点。A 进入手转测量，B 用 ticks/s。")) {
-                if (!calibrateScale(wheel)) return;
-                wheel = new Flywheel(hardwareMap, store);
-            }
-            String prompt = wheel.fullPowerSpeed() > 0
-                    ? "A 重测 0.10 到 1.00 的 17 点功率曲线，B 沿用已保存曲线。更换结构后选 A。"
-                    : "确认无球后按 A 测 0.10 到 1.00 的 17 点功率曲线。";
-            if (confirm(prompt)) {
-                while (!fitModel(wheel)) {
-                    if (!opModeIsActive() || motionAborted() || !confirm("曲线未测成。A 重测，B 结束。")) return;
-                    wheel = new Flywheel(hardwareMap, store);
+                wheel = new Flywheel(hardwareMap, store, battery);
+                if (wheel.ticksPerRev <= 0 || confirm("A 重测每转计数，B 使用当前 RPM 比例。")) {
+                    if (!calibrateScale(wheel)) return;
                 }
-                wheel = new Flywheel(hardwareMap, store);
-            }
-            if (wheel.fullPowerSpeed() <= 0) {
-                telemetry.log().add("缺少 1.00 稳态转速。检查 m-8 编码器和电池后重跑 04。");
+                wheel = new Flywheel(hardwareMap, store, battery);
+                if (!confirm("确认供弹通道为空，手已移开。A 启动七档电压扫描，结束后自动进入 PID 拟合。")) return;
+                if (!fitModel(wheel, battery)) return;
+                wheel = new Flywheel(hardwareMap, store, battery);
+            } else if (!confirm("复用已有前馈。确认供弹通道为空，手已移开。A 启动 PID 拟合。")) {
                 return;
             }
-            fullPowerSpeed = wheel.fullPowerSpeed();
-            fullPowerRpm = wheel.ticksPerRev > 0 ? 60 * fullPowerSpeed / wheel.ticksPerRev : 0;
-            double[] speeds = tuningSpeeds(wheel);
-            if (speeds.length == 0) {
-                telemetry.log().add("可稳速范围过窄，无法形成有效 PID 阶跃。");
+            if (!wheel.rpmCalibrated()) {
+                telemetry.log().add("缺少 RPM 比例或电压曲线。");
                 return;
             }
-            double duration = Maths.clip(1.65 * wheel.longestMeasuredTransition() + 1.40, MIN_STEP_DURATION, 10.0);
-            if (!confirm("确认无球。A 开始 20–32 轮 PID 搜索和留出复测，B 跳过。",
-                    () -> showCoverage(speeds, duration))) return;
-            Flywheel tested = wheel;
-            double[] current = wheel.pidGains();
-            BayesianPidSearch search = new BayesianPidSearch(
-                    new double[]{Math.max(1.1, current[0] * 1.5), Math.max(1.5, current[1] * 1.5),
-                            Math.max(0.080, current[2] * 1.5)},
-                    new double[]{0.40, 0.26, 0.012});
-            search.tune(current,
-                    (gains, verification, pattern) -> pidTrial(tested, gains, speeds, duration, verification, pattern),
-                    () -> !opModeIsActive() || motionAborted() || tested.faulted(),
-                    store.readHistory(CalibrationStore.FLYWHEEL_PID_HISTORY, BayesianPidSearch.HISTORY_STRIDE,
-                            BayesianPidSearch.HISTORY_ROWS));
-            completed = search;
-            if (active(tested) && search.searchCount() > 0) {
-                save(CalibrationStore.FLYWHEEL_PID_HISTORY, search.history());
-            }
-            BayesianPidSearch.Review best = search.bestCandidate();
-            if (best != null && active(tested)) {
-                tested.stop();
-                if (!choosePid(search, best, () -> showCoverage(speeds, duration))) {
-                    outcome = "保留旧 PID";
-                    return;
-                }
-                outcome = active(tested) && save(CalibrationStore.FLYWHEEL_PID, best.gains)
-                        ? "已保存新 PID" : "新 PID 未写入";
-                telemetry.log().add("%s，代价 %.3f，P/I/D %.3f / %.3f / %.3f",
-                        outcome, best.score, best.gains[0], best.gains[1], best.gains[2]);
-            } else if (opModeIsActive() && !motionAborted()) {
-                outcome = tested.faulted() ? "飞轮编码器异常，保留原 PID"
-                        : search.searchCount() < BayesianPidSearch.MIN_ROUNDS ? "有效搜索轮数不足，保留原 PID"
-                        : "没有新参数全部通过复测，保留原 PID";
-                telemetry.log().add("%s", outcome);
+            curveLimit = wheel.maxTargetRpm();
+            pidCalibration = new FlywheelPidCalibration(this, wheel);
+            pidCalibration.run();
+            if (!opModeIsActive() || motionWasAborted() || wheel.faulted()) return;
+            if (wheel.hasBlocker() && confirm("可装入最多三颗球，移开手并朝向得分区。A 开始回速测试，B 结束。")) {
+                testRecovery(wheel);
             }
         } finally {
             wheel.stop();
@@ -110,28 +57,9 @@ public final class FlywheelCalibration extends CalibrationOp {
     }
 
     @Override void showResults() {
-        if (fullPowerSpeed > 0) telemetry.addData("1.00 稳态", speedText(fullPowerSpeed, fullPowerRpm));
-        if (completed == null) return;
-        telemetry.addData("结果", outcome == null ? "中止" : outcome);
-        telemetry.addData("搜索", "历史 %d / 本轮 %d / 最低代价 %.3f",
-                completed.historyCount(), completed.searchCount(), completed.bestSearchCost());
-        telemetry.addData("PID 实测峰值功率", "%.2f", peakPidPower);
-        showPidReview("旧 PID", completed.incumbent());
-        showPidReview("最佳新 PID", completed.bestCandidate());
-    }
-
-    private static String speedText(double ticks, double rpm) {
-        return rpm > 0 ? String.format(Locale.US, "%.0f ticks/s (%.0f RPM)", ticks, rpm)
-                : String.format(Locale.US, "%.0f ticks/s", ticks);
-    }
-
-    private double testedRpm(double speed) { return speed * fullPowerRpm / fullPowerSpeed; }
-
-    private void showCoverage(double[] speeds, double duration) {
-        double low = speeds[0], high = speeds[speeds.length - 1];
-        telemetry.addData("PID 复测范围", "%s 到 %s，%d 点", speedText(low, testedRpm(low)),
-                speedText(high, testedRpm(high)), speeds.length);
-        telemetry.addData("每个阶跃最长", "%.1f 秒", duration);
+        if (curveLimit > 0) telemetry.addData("目标上限", "%.0f RPM", curveLimit);
+        if (pidCalibration != null) pidCalibration.showResults();
+        for (String recovery : recoveries) telemetry.addLine(recovery);
     }
 
     private boolean calibrateDirection(Flywheel wheel) throws InterruptedException {
@@ -198,227 +126,110 @@ public final class FlywheelCalibration extends CalibrationOp {
         return false;
     }
 
-    private boolean fitModel(Flywheel wheel) throws InterruptedException {
-        Measurements.PowerFit fit = new Measurements.PowerFit();
-        Measurements referenceSpeeds = new Measurements(), fullSpeeds = new Measurements();
-        double minimumSpeed = Double.POSITIVE_INFINITY, longestTransition = 0;
-        int measuredPoints = 0;
+    private boolean fitModel(Flywheel wheel, BatteryVoltage battery) throws InterruptedException {
+        List<double[]> points = new ArrayList<>();
         try {
-            for (double power : POWER_LEVELS) {
-                if (!active(wheel)) break;
-                Plateau plateau = measurePlateau(wheel, power, power <= 0.22 ? 3.5 : 7.0);
-                if (!Double.isFinite(plateau.speed)) continue;
-                measuredPoints++;
-                minimumSpeed = Math.min(minimumSpeed, plateau.speed);
-                fit.add(plateau.speed, power);
-                if (power == REFERENCE_POWER) referenceSpeeds.add(plateau.speed);
-                if (power == FULL_POWER) fullSpeeds.add(plateau.speed);
-            }
-            for (int repeat = 0; repeat < 2 && active(wheel); repeat++) {
-                if (fullSpeeds.size() >= 2 && fullSpeeds.relativeSpread() <= 0.04) break;
-                // Recheck the high end after a separate lower-duty plateau.
-                Plateau reference = measurePlateau(wheel, REFERENCE_POWER, 8.0);
-                referenceSpeeds.add(reference.speed);
-                fit.add(reference.speed, REFERENCE_POWER);
-                longestTransition = Math.max(longestTransition, reference.seconds);
-                if (!active(wheel)) break;
-                Plateau full = measurePlateau(wheel, FULL_POWER, 8.0);
-                fit.add(full.speed, FULL_POWER);
-                fullSpeeds.add(full.speed);
-                longestTransition = Math.max(longestTransition, full.seconds);
+            for (double volts : VOLTAGE_LEVELS) {
+                if (!opModeIsActive() || motionAborted() || wheel.faulted()) return false;
+                double[] row = measurePlateau(wheel, battery, volts);
+                if (row != null && (points.isEmpty() || row[1] - points.get(points.size() - 1)[1] > 0.1)) {
+                    points.add(row);
+                    telemetry.log().add("%.2f V → %.0f ticks/s", row[1], row[0]);
+                }
             }
         } finally {
             wheel.stop();
         }
-        if (!active(wheel)) return false;
-        double full = fullSpeeds.median();
-        double[] coefficients = fit.fit(Math.max(8, full * 0.07));
-        if (measuredPoints < 6 || fullSpeeds.size() < 2 || fullSpeeds.relativeSpread() > 0.05 || !(full >= 40)
-                || coefficients == null || coefficients[0] > 0.50) {
-            telemetry.log().add("曲线未通过，稳态功率点 %d/%d，满功率样本 %d 组。",
-                    measuredPoints, POWER_LEVELS.length, fullSpeeds.size());
+        if (!opModeIsActive() || motionAborted() || wheel.faulted()) return false;
+        if (points.size() < 6 || points.get(points.size() - 1)[1] < 9) {
+            telemetry.log().add("有效稳态点不足。检查编码器及电压后重测，保留旧曲线。");
             return false;
         }
-        double reference = referenceSpeeds.size() > 0 ? referenceSpeeds.median()
-                : (REFERENCE_POWER - coefficients[0]) / coefficients[1];
-        if (!(reference >= 20 && reference < full)) return false;
-        double slope = (RobotConfig.FLYWHEEL_MAX_POWER - coefficients[0]) * reference / full;
-        telemetry.log().add("功率曲线有效 %d/%d 点，1.00 稳态 %.0f ticks/s，共 %d 组。",
-                measuredPoints, POWER_LEVELS.length, full, fullSpeeds.size());
-        return save(CalibrationStore.FLYWHEEL_FULL_POWER_MODEL, reference, coefficients[0], slope, full,
-                minimumSpeed, longestTransition);
+        double ref = points.get(points.size() - 1)[0];
+        double[] curve = fitCurve(points, ref, true);
+        if (!Flywheel.validModel(curve)) curve = fitCurve(points, ref, false);
+        if (!Flywheel.validModel(curve)) {
+            telemetry.log().add("曲线拟合无效，保留旧曲线。");
+            return false;
+        }
+        return save(CalibrationStore.FLYWHEEL_VOLTAGE_MODEL, curve);
     }
 
-    private Plateau measurePlateau(Flywheel wheel, double power, double timeout) throws InterruptedException {
-        Plateau plateau = new Plateau();
-        runFor(timeout, (t, dt) -> {
+    private static double[] fitCurve(List<double[]> points, double ref, boolean quadratic) {
+        LeastSquares fit = new LeastSquares(quadratic ? new double[]{1e-6, 1e-6, 0.001}
+                : new double[]{1e-6, 1e-6}, null);
+        for (double[] point : points) {
+            double rate = point[0] / ref;
+            fit.add(quadratic ? new double[]{1, rate, rate * rate} : new double[]{1, rate}, point[1], 1);
+        }
+        double[] values = fit.solve();
+        return values == null ? null : new double[]{ref, Math.max(0, values[0]), values[1], quadratic ? values[2] : 0};
+    }
+
+    private double[] measurePlateau(Flywheel wheel, BatteryVoltage battery, double volts) throws InterruptedException {
+        double[] stable = {0, 0, 0, 0};
+        runFor(5.5, (t, dt) -> {
             wheel.sample();
             if (wheel.faulted()) return false;
-            // Use samples only after both motors have held the requested output.
-            if (Math.abs(wheel.output - power) < 1e-6) plateau.sample(wheel.speed, dt);
-            wheel.power(power, dt);
-            show("飞轮功率曲线", "设定 %.2f / 实际 %.2f / %s",
-                    power, wheel.output, speedText(wheel.speed,
-                            wheel.ticksPerRev > 0 ? 60 * wheel.speed / wheel.ticksPerRev : 0));
-            if (Double.isFinite(plateau.speed)) plateau.seconds = t;
-            return !Double.isFinite(plateau.speed);
+            double delivered = wheel.deliveredVolts();
+            double target = Math.min(volts, battery.volts());
+            if (t > 0.7 && wheel.speed > 10 && Math.abs(delivered - target) < 0.12
+                    && Math.abs(wheel.speed - stable[3]) < Math.max(3, 0.018 * wheel.speed)) {
+                stable[0] += dt;
+                stable[1] += wheel.speed * dt;
+                stable[2] += delivered * dt;
+            } else stable[0] = stable[1] = stable[2] = 0;
+            stable[3] = wheel.speed;
+            wheel.powerVolts(volts, dt);
+            show("飞轮空载曲线", "%.1f V / 实际 %.2f V / %.0f ticks/s", volts, delivered, wheel.speed);
+            return stable[0] < 0.55;
         });
-        if (Double.isFinite(plateau.speed)) telemetry.log().add("功率 %.2f，稳态 %.0f ticks/s", power, plateau.speed);
-        return plateau;
+        return stable[0] >= 0.55 ? new double[]{stable[1] / stable[0], stable[2] / stable[0]} : null;
     }
 
-    private static final class Plateau {
-        private double warmup, window, total, previous = Double.NaN;
-        double speed = Double.NaN, seconds;
-
-        void sample(double velocity, double dt) {
-            warmup += dt;
-            if (warmup < 0.65) return;
-            window += dt;
-            total += velocity * dt;
-            if (window < 0.32) return;
-            double mean = total / window;
-            if (mean >= 20 && Math.abs(mean - previous) <= 0.022 * mean) speed = (mean + previous) / 2;
-            previous = mean;
-            window = total = 0;
-        }
-    }
-
-    private double[] tuningSpeeds(Flywheel wheel) {
-        double maximum = wheel.estimatedSpeedAtPower(RobotConfig.FLYWHEEL_TARGET_MAX_DUTY);
-        double measuredMinimum = wheel.lowestMeasuredSpeed();
-        double minimum = Math.max(0.18 * maximum, 1.05 * measuredMinimum);
-        double operating = wheel.rpmCalibrated()
-                ? Math.min(RobotConfig.FLYWHEEL_TARGET_RPM * wheel.ticksPerRev / 60, maximum) : Double.NaN;
-        if (Double.isFinite(operating) && operating < minimum) {
-            if (operating >= measuredMinimum && operating > 0) minimum = operating;
-            else telemetry.log().add("%.0f RPM 低于已测稳定转速，本轮从已测范围开始。",
-                    RobotConfig.FLYWHEEL_TARGET_RPM);
-        }
-        return rangeSpeeds(minimum, maximum, operating);
-    }
-
-    static double[] rangeSpeeds(double minimum, double maximum, double operating) {
-        if (!Maths.finite(minimum, maximum) || minimum <= 0 || maximum - minimum < 0.18 * maximum) {
-            return new double[0];
-        }
-        boolean includeOperating = operating > minimum && operating < maximum;
-        double[] speeds = new double[RANGE_POINTS + (includeOperating ? 1 : 0)];
-        for (int i = 0; i < RANGE_POINTS; i++) {
-            speeds[i] = minimum + (maximum - minimum) * i / (RANGE_POINTS - 1);
-            if (includeOperating && Math.abs(speeds[i] - operating) <= 1e-6 * maximum) {
-                speeds[i] = operating;
-                includeOperating = false;
-            }
-        }
-        if (!includeOperating) return Arrays.copyOf(speeds, RANGE_POINTS);
-        speeds[RANGE_POINTS] = operating;
-        Arrays.sort(speeds);
-        return speeds;
-    }
-
-    static double[] verificationTargets(double[] speeds, int pattern) {
-        double[] targets = new double[speeds.length];
-        for (int i = 0; i < targets.length; i++) {
-            // A stride of three visits every point in either a seven- or eight-point grid.
-            int index = (3 + 3 * i) % speeds.length;
-            targets[i] = speeds[pattern == 0 ? index : speeds.length - 1 - index];
-        }
-        return targets;
-    }
-
-    private BayesianPidSearch.Result pidTrial(Flywheel wheel, double[] gains, double[] speeds, double duration,
-                                               boolean verification, int pattern) throws InterruptedException {
-        int last = speeds.length - 1;
-        double start = speeds[verification ? (pattern == 0 ? 0 : last) : last / 4];
-        double[] targets = verification ? verificationTargets(speeds, pattern)
-                : new double[]{speeds[3 * last / 4], speeds[0], speeds[last], speeds[last / 2]};
-        if (!active(wheel)) return null;
-        wheel.setGains(Flywheel.DEFAULT_GAINS);
-        trials++;
+    private void testRecovery(Flywheel wheel) throws InterruptedException {
+        Intake intake = new Intake(hardwareMap);
+        double target = Math.min(RobotConfig.FLYWHEEL_TARGET_RPM, 0.96 * wheel.maxTargetRpm());
+        double[] drop = {Double.NaN, 0};
+        boolean[] feeding = {false};
         try {
-            prepareSpeed(wheel, start, duration, false);
-            if (active(wheel) && Math.abs(wheel.speed - start) > 0.09 * start) {
-                prepareSpeed(wheel, start, duration, true);
-            }
-            if (!active(wheel)) return null;
-            if (Math.abs(wheel.speed - start) > 0.12 * start) {
-                return BayesianPidSearch.Result.unavailable("起始转速未到位 " + speedText(start, testedRpm(start)));
-            }
-            return measureSteps(wheel, gains, targets, duration, verification);
-        } finally {
-            wheel.stop();
-        }
-    }
-
-    private void prepareSpeed(Flywheel wheel, double target, double duration, boolean feedforward)
-            throws InterruptedException {
-        runFor(feedforward ? 0.65 * duration : duration, (t, dt) -> {
-            wheel.sample();
-            if (wheel.faulted()) return false;
-            if (feedforward) wheel.power(wheel.estimatedPowerForSpeed(target), dt);
-            else wheel.regulate(target);
-            show("飞轮准备起始转速", "%s / %s", speedText(wheel.speed, testedRpm(wheel.speed)),
-                    speedText(target, testedRpm(target)));
-            return t < 0.22 || Math.abs(wheel.speed - target) > target * 0.045;
-        });
-    }
-
-    private BayesianPidSearch.Result measureSteps(Flywheel wheel, double[] gains, double[] targets, double duration,
-                                                   boolean verification) throws InterruptedException {
-        wheel.setGains(gains);
-        double total = 0, worst = 0, margin = 0.11, overspeed = fullPowerSpeed * 1.08;
-        boolean settled = true;
-        String firstFailure = "";
-        for (int index = 0; index < targets.length; index++) {
-            double target = targets[index];
-            int stepNumber = index + 1;
-            double initial = wheel.speed;
-            double step = target - initial;
-            if (Math.abs(step) < target * 0.04) {
-                total += 4;
-                worst = Math.max(worst, 4);
-                settled = false;
-                if (firstFailure.isEmpty()) firstFailure = "未形成有效转速阶跃";
-                continue;
-            }
-            StepScore response = new StepScore(duration);
-            boolean[] runaway = {false};
-            runFor(duration, (t, dt) -> {
+            runFor(15, (time, dt) -> {
                 wheel.sample();
                 if (wheel.faulted()) return false;
-                if (wheel.speed > overspeed) {
-                    runaway[0] = true;
-                    return false;
+                wheel.requestRpm(target);
+                double rpm = wheel.rpm();
+                boolean held = gamepad1.right_trigger > 0.10;
+                boolean ready = Math.abs(rpm - target) <= 0.05 * target;
+                show("三球回速测试，停稳后按住 RT，B 停止", "%.0f / %.0f RPM，已恢复 %d 球", rpm, target, recoveries.size());
+                if (feeding[0] && !held) return false;
+                if (!feeding[0] && (!held || !ready || !intake.readyToFeed())) return true;
+                if (!wheel.feed(true)) return false;
+                intake.set(false, true, false);
+                feeding[0] = true;
+                if (!Double.isFinite(drop[0]) && rpm < 0.95 * target) {
+                    drop[0] = time;
+                    drop[1] = rpm;
+                } else if (Double.isFinite(drop[0])) {
+                    drop[1] = Math.min(drop[1], rpm);
+                    if (ready || rpm > target) {
+                        recordRecovery(drop[1], 1000 * (time - drop[0]));
+                        drop[0] = Double.NaN;
+                    }
                 }
-                wheel.regulate(target);
-                peakPidPower = Math.max(peakPidPower, wheel.output);
-                response.sample(t, dt, (wheel.speed - initial) / step, wheel.output, Math.abs(wheel.speed - target)
-                        <= target * RobotConfig.FLYWHEEL_SPEED_TOLERANCE);
-                show((verification ? "飞轮 PID 复测 " : "飞轮 PID 搜索 ") + trials,
-                        "测点 %d/%d，%s / %s，功率 %.2f，峰值 %.2f", stepNumber, targets.length,
-                        speedText(wheel.speed, testedRpm(wheel.speed)), speedText(target, testedRpm(target)),
-                        wheel.output, peakPidPower);
-                return verification || !response.finishIfSettled(0.55);
+                return recoveries.size() < 3;
             });
-            if (!active(wheel)) return null;
-            if (runaway[0]) return new BayesianPidSearch.Result(10, -0.6, false, "转速保护");
-            boolean arrived = Double.isFinite(response.settlingTime(PID_HOLD));
-            margin = Math.min(margin, 0.11 - response.overshoot() * Math.abs(step) / target);
-            if (firstFailure.isEmpty() && (!arrived || margin < 0)) {
-                firstFailure = speedText(target, testedRpm(target)) + (margin < 0 ? " 超调超限"
-                        : String.format(Locale.US, " 未稳速，末端 %+.1f%%", 100 * (wheel.speed / target - 1)));
-            }
-            double cost = Math.min(9, arrived ? response.scoreWithSettlingTime(PID_HOLD) : 2.6 + response.score());
-            total += cost;
-            worst = Math.max(worst, cost);
-            settled &= arrived;
+            if (Double.isFinite(drop[0])) recordRecovery(drop[1], -1);
+            if (recoveries.isEmpty()) telemetry.log().add("未检测到超过 5% 的掉速事件。");
+        } finally {
+            wheel.stop();
+            intake.stop();
         }
-        double score = 0.70 * total / targets.length + 0.30 * worst;
-        telemetry.log().add("飞轮第 %d 轮 %.3f，超调裕量 %+.2f%s", trials, score, margin,
-                settled && margin >= 0 ? "，稳速" : "");
-        return new BayesianPidSearch.Result(score, margin, settled, firstFailure);
     }
 
-    private boolean active(Flywheel wheel) { return opModeIsActive() && !motionAborted() && !wheel.faulted(); }
+    private void recordRecovery(double minimum, double millis) {
+        String value = String.format(java.util.Locale.ROOT, "第 %d 次掉速：最低 %.0f RPM，%s",
+                recoveries.size() + 1, minimum, millis < 0 ? "结束时未恢复" : String.format(java.util.Locale.ROOT, "%.0f ms 恢复", millis));
+        recoveries.add(value);
+        telemetry.log().add("%s", value);
+    }
 }

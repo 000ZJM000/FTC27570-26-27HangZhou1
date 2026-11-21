@@ -6,7 +6,6 @@ import com.qualcomm.robotcore.hardware.Servo;
 import com.qualcomm.robotcore.util.RobotLog;
 
 public final class Intake {
-    private static final double MAX_FEED_STEP_SECONDS = 0.04;
     private final DcMotor motor;
     private final Servo sl, sr;
     private boolean lowered;
@@ -15,18 +14,22 @@ public final class Intake {
 
     public Intake(HardwareMap map) {
         motor = map.get(DcMotor.class, RobotConfig.INTAKE);
+        motor.setPower(0);
         motor.setDirection(RobotConfig.INTAKE_DIRECTION);
         motor.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         motor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         sl = map.get(Servo.class, RobotConfig.INTAKE_LEFT_SERVO);
         sr = map.get(Servo.class, RobotConfig.INTAKE_RIGHT_SERVO);
-        motor.setPower(0);
         sl.setPosition(RobotConfig.SL_UP);
         sr.setPosition(RobotConfig.SR_UP);
         raisedAt = Maths.time();
     }
 
-    public void set(boolean intakeRequested, boolean shotRequested, boolean reverseRequested, double dt) {
+    public boolean readyToFeed() {
+        return !lowered && power >= 0 && Maths.time() - raisedAt >= RobotConfig.INTAKE_RAISE_SETTLE_SECONDS;
+    }
+
+    public void set(boolean intakeRequested, boolean shotRequested, boolean reverseRequested) {
         boolean lower = intakeRequested && !shotRequested && !reverseRequested;
         boolean raising = lowered && !lower;
         if (raising || (!lower && !shotRequested && !reverseRequested)) setPower(0);
@@ -38,22 +41,20 @@ public final class Intake {
         }
         lowered = lower;
         if (reverseRequested) setPower(-RobotConfig.INTAKE_REVERSE_POWER);
-        else if (shotRequested) rampFeed(dt);
-        else if (lowered) setPower(RobotConfig.INTAKE_POWER);
+        else if (shotRequested) {
+            boolean starting = power != RobotConfig.FEED_POWER;
+            setPower(readyToFeed() ? RobotConfig.FEED_POWER : 0);
+            if (starting && power > 0) RobotLog.ii("BioBuzzShot", "m-5 feed at %.2f", power);
+        } else if (lowered) setPower(RobotConfig.INTAKE_POWER);
     }
 
-    private void rampFeed(double dt) {
-        if (power < 0 || Maths.time() - raisedAt < RobotConfig.INTAKE_RAISE_SETTLE_SECONDS) {
-            setPower(0);
-            return;
-        }
-        double before = power;
-        double step = RobotConfig.FEED_POWER_PER_SECOND * Maths.clip(dt, 0, MAX_FEED_STEP_SECONDS);
-        setPower(Math.min(RobotConfig.FEED_POWER, before + step));
-        if (before == 0 && power > 0) RobotLog.ii("BioBuzzShot", "m-5 ramp starts at %.2f", power);
-        if (before < RobotConfig.FEED_POWER && power == RobotConfig.FEED_POWER) {
-            RobotLog.ii("BioBuzzShot", "m-5 reached %.2f", power);
-        }
+    public void stop() {
+        HardwareStop.attempt(RobotConfig.INTAKE, () -> motor.setPower(0));
+        HardwareStop.attempt(RobotConfig.INTAKE_LEFT_SERVO, () -> sl.setPosition(RobotConfig.SL_UP));
+        HardwareStop.attempt(RobotConfig.INTAKE_RIGHT_SERVO, () -> sr.setPosition(RobotConfig.SR_UP));
+        if (lowered) raisedAt = Maths.time();
+        lowered = false;
+        power = 0;
     }
 
     private void setPower(double next) {

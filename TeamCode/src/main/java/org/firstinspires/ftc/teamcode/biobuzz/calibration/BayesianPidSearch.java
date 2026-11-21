@@ -11,11 +11,11 @@ import java.util.function.BooleanSupplier;
 
 /** Constrained Bayesian search using separate Gaussian processes for score and overshoot margin. */
 final class BayesianPidSearch {
-    static final int MIN_ROUNDS = 20, MAX_ROUNDS = 32;
+    static final int MIN_ROUNDS = 8, MAX_ROUNDS = 12;
     static final int HISTORY_STRIDE = 6, HISTORY_ROWS = 40;
     static final int VERIFICATION_ROUNDS = 2;
-    private static final int FINALISTS = 3, RECORD_PATIENCE = 8;
-    private final double[] max, scale;
+    private static final int FINALISTS = 2, RECORD_PATIENCE = 4;
+    private final double[] min, max, scale;
     private final Random random = new Random(27270);
     private final List<Observation> data = new ArrayList<>();
     private final List<Review> reviews = new ArrayList<>();
@@ -26,7 +26,7 @@ final class BayesianPidSearch {
     }
 
     static final class Result {
-        final double cost, margin;
+        final double cost, margin, steadyError;
         final boolean settled;
         final String reason;
 
@@ -35,10 +35,15 @@ final class BayesianPidSearch {
         }
 
         Result(double cost, double margin, boolean settled, String reason) {
+            this(cost, margin, settled, reason, Double.NaN);
+        }
+
+        Result(double cost, double margin, boolean settled, String reason, double steadyError) {
             this.cost = cost;
             this.margin = margin;
             this.settled = settled;
             this.reason = reason;
+            this.steadyError = steadyError;
         }
 
         static Result unavailable(String reason) {
@@ -49,20 +54,22 @@ final class BayesianPidSearch {
     static final class Review {
         final double[] gains;
         final int passed;
-        final double score;
+        final double score, steadyError;
         final String firstFailure;
 
-        Review(double[] gains, int passed, double score, String firstFailure) {
+        Review(double[] gains, int passed, double score, String firstFailure, double steadyError) {
             this.gains = gains;
             this.passed = passed;
             this.score = score;
             this.firstFailure = firstFailure;
+            this.steadyError = steadyError;
         }
 
         boolean qualified() { return passed == VERIFICATION_ROUNDS && Double.isFinite(score); }
     }
 
-    BayesianPidSearch(double[] max, double[] scale) {
+    BayesianPidSearch(double[] min, double[] max, double[] scale) {
+        this.min = min.clone();
         this.max = max.clone();
         this.scale = scale.clone();
     }
@@ -96,12 +103,15 @@ final class BayesianPidSearch {
             }
         }
         int success = 0, stagnant = 0, lastRecord = 0;
-        for (int round = 0, attempts = 0; round < MAX_ROUNDS && attempts < MAX_ROUNDS + 12
+        boolean resample = false;
+        for (int round = 0, attempts = 0; round < MAX_ROUNDS && attempts < MAX_ROUNDS
                 && !cancelled.getAsBoolean(); attempts++) {
-            double[] x = round == 0 ? baseline : propose(center, radius, round % 5 == 0, cancelled);
+            double[] x = attempts == 0 ? baseline : resample ? sample(center, radius)
+                    : propose(center, radius, attempts % 5 == 0, cancelled);
             if (cancelled.getAsBoolean()) return;
-            Result score = trial.test(round == 0 ? existing.clone() : gains(x), false, round % 6);
-            if (!measured(score)) continue;
+            Result score = trial.test(gains(x), false, attempts % 6);
+            resample = !measured(score);
+            if (resample) continue;
             data.add(new Observation(x, score));
             round++;
             if (score.cost < record) {
@@ -135,6 +145,7 @@ final class BayesianPidSearch {
             if (finalists.size() == FINALISTS) break;
         }
         double[][] costs = new double[finalists.size()][VERIFICATION_ROUNDS];
+        double[] steadyErrors = new double[finalists.size()];
         int[] passed = new int[finalists.size()];
         String[] firstFailure = new String[finalists.size()];
         for (int repeat = 0; repeat < VERIFICATION_ROUNDS; repeat++) {
@@ -150,8 +161,10 @@ final class BayesianPidSearch {
                 }
                 boolean pass = measured(result) && result.settled && result.margin >= 0;
                 costs[j][repeat] = pass ? result.cost : Double.POSITIVE_INFINITY;
-                if (pass) passed[j]++;
-                else if (firstFailure[j] == null) {
+                if (pass) {
+                    passed[j]++;
+                    steadyErrors[j] = Math.max(steadyErrors[j], result.steadyError);
+                } else if (firstFailure[j] == null) {
                     String reason = result != null && !result.reason.isEmpty() ? result.reason
                             : !measured(result) ? "无有效读数"
                             : result.margin < 0 ? "超调超限" : "未停稳";
@@ -161,7 +174,8 @@ final class BayesianPidSearch {
         }
         for (int i = 0; i < costs.length; i++) {
             double value = passed[i] == VERIFICATION_ROUNDS ? validationScore(costs[i]) : Double.POSITIVE_INFINITY;
-            reviews.add(new Review(i == 0 ? existing.clone() : gains(finalists.get(i)), passed[i], value, firstFailure[i]));
+            reviews.add(new Review(i == 0 ? existing.clone() : gains(finalists.get(i)), passed[i], value,
+                    firstFailure[i], steadyErrors[i]));
         }
     }
 
@@ -169,7 +183,7 @@ final class BayesianPidSearch {
         for (int i = 0; i + HISTORY_STRIDE <= history.length; i += HISTORY_STRIDE) {
             double[] old = {history[i], history[i + 1], history[i + 2]};
             boolean inBounds = true;
-            for (int axis = 0; axis < 3; axis++) inBounds &= old[axis] >= 0 && old[axis] <= max[axis];
+            for (int axis = 0; axis < 3; axis++) inBounds &= old[axis] >= min[axis] && old[axis] <= max[axis];
             Result remembered = new Result(history[i + 3], history[i + 4], history[i + 5] == 1);
             if (inBounds && measured(remembered)) data.add(new Observation(normalize(old), remembered));
         }
@@ -197,7 +211,7 @@ final class BayesianPidSearch {
     private double[] propose(double[] center, double radius, boolean explore, BooleanSupplier cancelled) {
         if (data.size() < 8) {
             double[] x = center.clone();
-            int direction = data.size() - 1;
+            int direction = Math.max(0, data.size() - 1);
             x[direction % 3] = Maths.clip(x[direction % 3] + (direction < 3 ? 0.15 : -0.15), 0, 1);
             return distance(x, center) > 0.03 && direction < 6 ? x : sample(center, 0.18);
         }
@@ -249,14 +263,17 @@ final class BayesianPidSearch {
     private double[] normalize(double[] gains) {
         double[] x = new double[3];
         for (int i = 0; i < x.length; i++) {
-            x[i] = Math.log1p(Maths.clip(gains[i], 0, max[i]) / scale[i]) / Math.log1p(max[i] / scale[i]);
+            x[i] = Math.log1p((Maths.clip(gains[i], min[i], max[i]) - min[i]) / scale[i])
+                    / Math.log1p((max[i] - min[i]) / scale[i]);
         }
         return x;
     }
 
     private double[] gains(double[] x) {
         double[] gains = new double[3];
-        for (int i = 0; i < x.length; i++) gains[i] = scale[i] * Math.expm1(x[i] * Math.log1p(max[i] / scale[i]));
+        for (int i = 0; i < x.length; i++) {
+            gains[i] = min[i] + scale[i] * Math.expm1(x[i] * Math.log1p((max[i] - min[i]) / scale[i]));
+        }
         return gains;
     }
 

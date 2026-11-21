@@ -21,8 +21,8 @@ final class TurretRewindCheck {
     static boolean supported(Turret turret) { return turret.span() >= Math.toRadians(270); }
     boolean passed() { return passedTurns == 2; }
 
-    String run() throws InterruptedException {
-        if (!op.confirm("回转验证：清空周围，底盘会依次向左右转。A 开始，双向通过才保存；B 保留原 PID。")) {
+    String run(boolean ask) throws InterruptedException {
+        if (ask && !op.confirm("回转验证：清空周围，底盘会依次向左右转。A 开始，双向通过才保存；B 保留原 PID。")) {
             return "已跳过";
         }
         Drive drive;
@@ -31,11 +31,19 @@ final class TurretRewindCheck {
         } catch (RuntimeException unavailable) {
             return "找不到底盘，已跳过";
         }
-        PinpointPose pose = new PinpointPose(op.hardwareMap);
+        PinpointPose pose = new PinpointPose(op.hardwareMap, op.battery);
         try {
-            if (!pose.startImu()) return "Pinpoint 未就绪";
-            op.runFor(2.0, (t, dt) -> { pose.update(); return !pose.headingValid; });
-            if (!active()) return "已中止";
+            if (!op.initializePinpoint(pose)) return "Pinpoint 未就绪";
+            return run(drive, pose);
+        } finally {
+            drive.stop();
+            turret.stop();
+        }
+    }
+
+    String run(Drive drive, PinpointPose pose) throws InterruptedException {
+        try {
+            pose.update();
             if (!pose.anchor(0, 0, 0)) return "Pinpoint 航向未就绪";
             String left = turn(drive, pose, 1);
             if (!active()) return left;

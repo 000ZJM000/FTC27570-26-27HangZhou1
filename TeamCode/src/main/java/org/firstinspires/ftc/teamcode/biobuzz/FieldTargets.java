@@ -9,11 +9,14 @@ public final class FieldTargets {
     public final int goal;
     public final double bearing;
     public final double distanceMm;
+    final double rightTiles, forwardTiles;
 
     private FieldTargets(int goal, double bearing, double distanceMm) {
         this.goal = goal;
         this.bearing = bearing;
         this.distanceMm = distanceMm;
+        rightTiles = goal == 1 ? LEFT_GOAL_RIGHT : RIGHT_GOAL_RIGHT;
+        forwardTiles = GOAL_FORWARD;
     }
 
     public static FieldTargets fromPose(double forwardMm, double leftMm, double heading) {

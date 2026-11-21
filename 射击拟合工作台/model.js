@@ -1,11 +1,11 @@
 (function () {
   "use strict";
 
-  const TILE = 609.6;
   const RAD = Math.PI / 180;
   const powers = [[0, 0], [1, 0], [0, 1], [2, 0], [1, 1], [0, 2], [3, 0], [2, 1], [1, 2], [0, 3]];
   const defaults = { angleOrder: 1, rpmOrder: 2, ridge: 0.18, angleTrim: 0, rpmTrim: 0 };
   const codeNames = ["格心", "左后", "右后", "右前", "左前"];
+  const defaultGeometry = { tileMm: 609.6, turretRightMm: 0, turretForwardMm: 0 };
 
   function wrap(angle) {
     return ((angle + 180) % 360 + 360) % 360 - 180;
@@ -15,7 +15,7 @@
     return codeNames[Number(id[2])] || "旧精测 " + id[2];
   }
 
-  function parse(text) {
+  function parse(text, geometry = defaultGeometry) {
     const token = /^([1-6][1-6][0-4a-h])(?:@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?))?:(?:(-?\d+)\/(\d+(?:\.\d+)?)|(\?))([!~]*)$/u;
     const points = new Map();
     const errors = [];
@@ -29,17 +29,18 @@
       }
       const [, id, right, forward, angle, rpm, absent, flags] = match;
       const [row, column, code] = id;
-      const halfWidth = 219.3 / TILE;
-      const rear = 177.47468 / TILE;
-      const front = 1 - (440.47468 - 177.47468) / TILE;
-      const positions = [[0.5, 0.5], [halfWidth, rear], [1 - halfWidth, rear],
-        [1 - halfWidth, front], [halfWidth, front]];
-      if (right === undefined && !positions[code]) {
+      const edges = ["leftEdgeMm", "rightEdgeMm", "rearEdgeMm", "frontEdgeMm"];
+      const knownCorners = edges.every(edge => Number.isFinite(geometry[edge]));
+      if (right === undefined && code !== "0" && (!knownCorners || !/[1-4]/.test(code))) {
         errors.push(word);
         continue;
       }
-      const x = right === undefined ? Number(column) - 1 + positions[code][0] : Number(right);
-      const y = forward === undefined ? Number(row) - 1 + positions[code][1] : Number(forward);
+      const cornerX = code === "0" ? 0.5 : /[14]/.test(code) ? geometry.leftEdgeMm / geometry.tileMm
+        : 1 - geometry.rightEdgeMm / geometry.tileMm;
+      const cornerY = code === "0" ? 0.5 : /[12]/.test(code) ? geometry.rearEdgeMm / geometry.tileMm
+        : 1 - geometry.frontEdgeMm / geometry.tileMm;
+      const x = right === undefined ? Number(column) - 1 + cornerX : Number(right);
+      const y = forward === undefined ? Number(row) - 1 + cornerY : Number(forward);
       if (!(x >= 0 && x <= 6 && y >= 0 && y <= 6) ||
           (!absent && !(Math.abs(Number(angle)) <= 18000 && Number(rpm) > 0 && Number(rpm) <= 20000))) {
         errors.push(word);
@@ -67,8 +68,17 @@
     return point.angle !== null && !point.blocked && !point.inactive && point.weight > 0;
   }
 
-  function canonical(point) {
-    return point.x < 3 ? point : { ...point, x: 6 - point.x, angle: -point.angle };
+  function fitPoints(points) {
+    const cellsWithCorners = new Set(points.filter(point => /[1-4]$/.test(point.id) && !point.inactive &&
+      (point.angle !== null || point.blocked)).map(point => point.id.slice(0, 2)));
+    return points.filter(point => usable(point) &&
+      (!/[a-h]$/.test(point.id) || !cellsWithCorners.has(point.id.slice(0, 2))));
+  }
+
+  function checkedGeometry(geometry) {
+    if (!geometry || !Number.isFinite(geometry.tileMm) || geometry.tileMm <= 0 ||
+        !Number.isFinite(geometry.turretRightMm) || !Number.isFinite(geometry.turretForwardMm)) return defaultGeometry;
+    return geometry;
   }
 
   function solve(matrix, vector) {
@@ -148,40 +158,62 @@
     return powers.filter(([xPower, yPower]) => xPower + yPower <= order);
   }
 
-  function basis(x, y, terms) {
-    const u = x - 0.5, v = (y - 3) / 3;
-    return terms.map(([p, q]) => u ** p * v ** q);
+  function normalization(points, key) {
+    const total = points.reduce((sum, point) => sum + point.weight, 0);
+    const mean = points.reduce((sum, point) => sum + point.weight * point[key], 0) / total;
+    const square = points.reduce((sum, point) => sum + point.weight * point[key] ** 2, 0) / total;
+    return [mean, Math.sqrt(Math.max(0.0625, square - mean * mean))];
   }
 
-  function fitPolynomial(points, order, target, ridge) {
-    const terms = polynomialTerms(order);
-    const penalty = terms.map(([p, q]) => p + q === 0 ? 1e-9 : ridge * (p + q) ** 2);
-    const coefficients = leastSquares(points, point => basis(point.x, point.y, terms), target, penalty);
-    return { terms, coefficients };
+  const normalized = (value, [center, scale]) => Math.max(-3, Math.min(3, (value - center) / scale));
+
+  function basis(x, y, poly) {
+    const u = normalized(x, poly.x), v = normalized(y, poly.y);
+    return poly.terms.map(([p, q]) => u ** p * v ** q);
   }
 
   function evaluate(poly, x, y) {
-    return basis(x, y, poly.terms).reduce((sum, term, index) => sum + term * poly.coefficients[index], 0);
+    return basis(x, y, poly).reduce((sum, term, index) => sum + term * poly.coefficients[index], 0);
   }
 
-  function fit(points, settings = defaults) {
-    const participating = points.filter(usable).map(canonical);
+  function fit(points, settings = defaults, inputGeometry = defaultGeometry) {
+    const geometry = checkedGeometry(inputGeometry);
+    const participating = fitPoints(points).map(point => {
+      const right = point.x >= 3;
+      const pivotX = point.x + geometry.turretRightMm / geometry.tileMm;
+      return { ...point, x: right ? 6 - pivotX : pivotX, y: point.y + geometry.turretForwardMm / geometry.tileMm,
+        angle: right ? -point.angle : point.angle, chassisX: right ? 6 - point.x : point.x, chassisY: point.y };
+    });
     if (participating.length === 0) return null;
     const goal = fitGoal(participating);
     const ridge = Math.max(0.00001, settings.ridge);
-    const angular = settings.angleOrder < 0 ? { terms: [], coefficients: [] }
-      : fitPolynomial(participating, settings.angleOrder, point =>
-        wrap(point.angle - bearing(point.x, point.y, goal)), ridge);
-    const speed = fitPolynomial(participating, settings.rpmOrder, point => point.rpm, ridge);
-    return { goal, angular, speed, hull: hull(participating), count: participating.length };
+    const terms = polynomialTerms(settings.angleOrder);
+    const angular = { terms, x: normalization(participating, "x"), y: normalization(participating, "y"), coefficients: [] };
+    if (terms.length) {
+      angular.coefficients = leastSquares(participating, point => basis(point.x, point.y, angular),
+        point => wrap(point.angle - bearing(point.x, point.y, goal)),
+        terms.map(([p, q]) => p + q === 0 ? 1e-9 : ridge * (p + q) ** 2));
+    }
+    const radial = participating.map(point => ({ ...point, r: Math.hypot(point.x - goal[0], point.y - goal[1]) }));
+    const radius = normalization(radial, "r");
+    const speedPowers = Array.from({ length: settings.rpmOrder + 1 }, (_, power) => power);
+    const speed = { radius, coefficients: leastSquares(radial,
+      point => speedPowers.map(power => normalized(point.r, radius) ** power), point => point.rpm,
+      speedPowers.map(power => power === 0 ? 1e-9 : ridge * power ** 2)) };
+    return { goal, angular, speed, angleTrim: settings.angleTrim, rpmTrim: settings.rpmTrim, geometry,
+      hull: hull(participating.map(point => ({ x: point.chassisX, y: point.chassisY }))), count: participating.length };
   }
 
-  function predict(model, x, y, settings = defaults) {
+  function predict(model, x, y) {
     if (!model) return null;
     const sign = x < 3 ? 1 : -1;
-    const localX = x < 3 ? x : 6 - x;
-    const angle = bearing(localX, y, model.goal) + evaluate(model.angular, localX, y) + settings.angleTrim;
-    return { angle: wrap(sign * angle), rpm: evaluate(model.speed, localX, y) + settings.rpmTrim };
+    const pivotX = x + model.geometry.turretRightMm / model.geometry.tileMm;
+    const pivotY = y + model.geometry.turretForwardMm / model.geometry.tileMm;
+    const localX = sign === 1 ? pivotX : 6 - pivotX;
+    const angle = bearing(localX, pivotY, model.goal) + evaluate(model.angular, localX, pivotY);
+    const r = normalized(Math.hypot(localX - model.goal[0], pivotY - model.goal[1]), model.speed.radius);
+    const rpm = model.speed.coefficients.reduceRight((sum, term) => sum * r + term, 0) + model.rpmTrim;
+    return { angle: wrap(sign * angle + model.angleTrim), rpm: Math.max(0, Math.min(20000, rpm)) };
   }
 
   function error(point, model, settings) {
@@ -191,15 +223,16 @@
   }
 
   function diagnostics(points, model, settings) {
-    const measured = points.filter(usable);
+    const measured = fitPoints(points);
     if (!model || !measured.length) return null;
+    const weight = measured.reduce((sum, point) => sum + point.weight, 0);
     const rmse = values => ({
-      angle: Math.sqrt(values.reduce((sum, value) => sum + value.angle ** 2, 0) / values.length),
-      rpm: Math.sqrt(values.reduce((sum, value) => sum + value.rpm ** 2, 0) / values.length)
+      angle: Math.sqrt(values.reduce((sum, value, i) => sum + measured[i].weight * value.angle ** 2, 0) / weight),
+      rpm: Math.sqrt(values.reduce((sum, value, i) => sum + measured[i].weight * value.rpm ** 2, 0) / weight)
     });
     const inside = rmse(measured.map(point => error(point, model, settings)));
     const validation = measured.length < 4 ? null : rmse(measured.map((point, index) =>
-      error(point, fit(measured.filter((_, other) => index !== other), settings), settings)));
+      error(point, fit(measured.filter((_, other) => index !== other), settings, model.geometry), settings)));
     return { inside, validation };
   }
 
@@ -228,7 +261,7 @@
       cross(point, points[(index + 1) % points.length], local) >= -1e-8);
   }
 
-  const api = { defaults, parse, validPoint, usable, pointName, wrap, fit, predict, error, diagnostics, supported };
+  const api = { defaults, defaultGeometry, checkedGeometry, parse, validPoint, usable, pointName, wrap, fit, predict, error, diagnostics, supported };
   globalThis.ShotFit = api;
   if (typeof module === "object" && module.exports) module.exports = api;
 })();

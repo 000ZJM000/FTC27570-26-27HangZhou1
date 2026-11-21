@@ -2,12 +2,15 @@ package org.firstinspires.ftc.teamcode.biobuzz.calibration;
 
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.util.RobotLog;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import org.firstinspires.ftc.robotcore.external.Telemetry;
 import org.firstinspires.ftc.teamcode.biobuzz.CalibrationStore;
+import org.firstinspires.ftc.teamcode.biobuzz.CalibratedShotMap;
 import org.firstinspires.ftc.teamcode.biobuzz.ShotVectorField;
+import org.firstinspires.ftc.teamcode.biobuzz.ShotRecords;
 import org.firstinspires.ftc.teamcode.biobuzz.ShotVectorField.PointData;
 
 @TeleOp(name = "07 校准数据查看", group = "BIOBUZZ 自测")
@@ -19,20 +22,34 @@ public final class ShotFieldDataView extends LinearOpMode {
 
     @Override public void runOpMode() {
         CalibrationStore store = new CalibrationStore(hardwareMap.appContext);
-        List<PointData> all = new ShotVectorField(store, false).pointsForReview();
-        all.addAll(new ShotVectorField(store, true).pointsForReview());
+        List<PointData> all = new ArrayList<>();
         List<PointData> recorded = new ArrayList<>();
-        for (PointData point : all) {
-            if (point.unreachable || point.shot != null) recorded.add(point);
-        }
-        List<String> allRows = compactRows(all);
-        List<String> recordedRows = compactRows(recorded);
+        List<String> allRows = new ArrayList<>(), recordedRows = new ArrayList<>();
+        reload(store, all, recorded, allRows, recordedRows);
 
         boolean showAll = false, details = false;
+        boolean exported = false, lastClear = false;
+        String exportStatus = "", modelStatus = "";
         int page = 0;
         telemetry.setDisplayFormat(Telemetry.DisplayFormat.MONOSPACE);
         telemetry.setMsTransmissionInterval(150);
         while (!isStopRequested()) {
+            boolean clear = gamepad1.start && gamepad1.y;
+            boolean export = gamepad1.yWasPressed();
+            if (isStarted() && ((!exported) || (export && !clear))) {
+                exported = true;
+                exportStatus = ShotRecords.export(store) ? ShotRecords.FILE + " 已导出" : "JSON 导出失败";
+                modelStatus = new CalibratedShotMap(store).description();
+                RobotLog.ii("BioBuzzShot", "%s", modelStatus);
+            }
+            if (isStarted() && clear && !lastClear) {
+                if (store.clearLegacyShotPoints()) {
+                    reload(store, all, recorded, allRows, recordedRows);
+                    page = 0;
+                    exportStatus = ShotRecords.export(store) ? "旧 v1 精测已清空并导出" : "已清空，JSON 导出失败";
+                } else exportStatus = "清空旧精测失败";
+            }
+            lastClear = clear;
             if (gamepad1.aWasPressed()) {
                 showAll = !showAll;
                 page = 0;
@@ -54,9 +71,25 @@ public final class ShotFieldDataView extends LinearOpMode {
             }
             if (details) showDetails(visible, showAll, page, pages);
             else showCompact(rows, visible.size(), showAll, page, pages);
+            telemetry.addLine("Y 导出 JSON | START + Y 清空旧 v1 精测");
+            if (!exportStatus.isEmpty()) telemetry.addLine(exportStatus);
+            if (!modelStatus.isEmpty()) telemetry.addData("射界模型", modelStatus);
             telemetry.update();
             sleep(50);
         }
+    }
+
+    private static void reload(CalibrationStore store, List<PointData> all, List<PointData> recorded,
+                               List<String> allRows, List<String> recordedRows) {
+        all.clear();
+        all.addAll(new ShotVectorField(store, false).pointsForReview());
+        all.addAll(new ShotVectorField(store, true).pointsForReview());
+        recorded.clear();
+        for (PointData point : all) if (point.unreachable || point.shot != null) recorded.add(point);
+        allRows.clear();
+        allRows.addAll(compactRows(all));
+        recordedRows.clear();
+        recordedRows.addAll(compactRows(recorded));
     }
 
     private static List<String> compactRows(List<PointData> points) {

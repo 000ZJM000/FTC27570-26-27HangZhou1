@@ -9,7 +9,8 @@ import org.firstinspires.ftc.teamcode.biobuzz.TurretPlant;
 
 final class TurretFrictionCalibration {
     private static final int SECTORS = TurretFriction.SECTORS;
-    private static final int[] PASSES = {0, 3, 1, 2};
+    private static final int[] PASSES = {0, 3, 1};
+    private static final int[] ANCHORS = {0, 2, 4, 7, 9, 11};
     private final CalibrationOp op;
 
     TurretFrictionCalibration(CalibrationOp op) { this.op = op; }
@@ -18,8 +19,8 @@ final class TurretFrictionCalibration {
         Bin[][] data = new Bin[SECTORS][2];
         for (Bin[] row : data) for (int side = 0; side < 2; side++) row[side] = new Bin();
         for (int round = 0; round < PASSES.length && active(); round++) {
-            for (int i = 0; i < SECTORS && active(); i++) {
-                int sector = round % 2 == 0 ? i : SECTORS - i - 1;
+            for (int i = 0; i < ANCHORS.length && active(); i++) {
+                int sector = ANCHORS[round % 2 == 0 ? i : ANCHORS.length - i - 1];
                 for (int j = 0; j < 2 && active(); j++) {
                     int direction = (j + round + sector) % 2 == 0 ? 1 : -1;
                     Bin bin = data[sector][TurretFriction.side(direction)];
@@ -69,7 +70,7 @@ final class TurretFrictionCalibration {
                     }
                 }
                 turret.power(direction * power);
-                op.show("整圈摩擦测量", "%d/%d 段，%s，第 %d 次",
+                op.show("代表角摩擦测量", "%d/%d 位置，%s，第 %d 次",
                         sector + 1, SECTORS, direction > 0 ? "左转" : "右转", round);
                 return true;
             });
@@ -83,23 +84,21 @@ final class TurretFrictionCalibration {
     private boolean save(Bin[][] data) {
         double[] model = new TurretFriction(op.store).values();
         TurretPlant baseline = TurretPlant.load(op.store);
-        int total = 0;
         for (int direction : new int[]{1, -1}) {
             int side = TurretFriction.side(direction);
             model[side] = baseline.kV(direction);
             int count = 0;
-            for (int sector = 0; sector < SECTORS; sector++) {
+            for (int sector : ANCHORS) {
                 Bin bin = data[sector][side];
                 if (bin.consistent()) count++;
             }
-            if (count < 8) {
+            if (count < 4) {
                 op.telemetry.log().add("%s有效段仅 %d/%d，保留原摩擦表。", direction > 0 ? "左转" : "右转",
-                        count, SECTORS);
+                        count, ANCHORS.length);
                 return false;
             }
-            total += count;
             op.telemetry.log().add("%s有效摩擦测量 %d/%d 段", direction > 0 ? "左转" : "右转", count, SECTORS);
-            for (int sector = 0; sector < SECTORS; sector++) {
+            for (int sector : ANCHORS) {
                 Bin bin = data[sector][side];
                 if (!bin.consistent()) continue;
                 int i = TurretFriction.index(sector, direction);
@@ -111,8 +110,23 @@ final class TurretFrictionCalibration {
                 model[i + 1] = rolling.size() >= 2
                         ? Maths.clip(rolling.median(), 0.015, 1.1 * model[i]) : model[i] * 0.80;
             }
+            for (int sector = 0; sector < SECTORS; sector++) {
+                if (data[sector][side].consistent()) continue;
+                int before = -1, after = -1;
+                for (int anchor : ANCHORS) {
+                    if (!data[anchor][side].consistent()) continue;
+                    if (anchor < sector) before = anchor;
+                    if (anchor > sector && after < 0) after = anchor;
+                }
+                if (before < 0) before = after;
+                if (after < 0) after = before;
+                double t = before == after ? 0 : (double) (sector - before) / (after - before);
+                double blend = t * t * (3 - 2 * t);
+                int i = TurretFriction.index(sector, direction);
+                int a = TurretFriction.index(before, direction), b = TurretFriction.index(after, direction);
+                for (int j = 0; j < 2; j++) model[i + j] = model[a + j] + blend * (model[b + j] - model[a + j]);
+            }
         }
-        if (total < 24) op.telemetry.log().add("剩余空段沿用已有或出厂基线，可重跑补齐。");
         return op.save(CalibrationStore.TURRET_FRICTION_MAP, model);
     }
 

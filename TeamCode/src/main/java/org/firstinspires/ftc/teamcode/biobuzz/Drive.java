@@ -5,7 +5,10 @@ import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.HardwareMap;
 
 public final class Drive {
+    private static final double POWER_CHANGE_PER_SECOND = 2 / 0.035;
     private final DcMotorEx[] motors = new DcMotorEx[4];
+    private final double[] applied = new double[4];
+    private double lastCommand = Maths.time();
 
     public Drive(HardwareMap map) {
         for (int i = 0; i < motors.length; i++) {
@@ -40,12 +43,31 @@ public final class Drive {
         double br = forward + right - clockwise;
         double peak = Math.max(Math.max(Math.abs(fl), Math.abs(bl)), Math.max(Math.abs(fr), Math.abs(br)));
         double scale = Math.max(1, peak / maxPower);
-        motors[0].setPower(fl / scale);
-        motors[1].setPower(bl / scale);
-        motors[2].setPower(fr / scale);
-        motors[3].setPower(br / scale);
-        return turn / scale;
+        double now = Maths.time();
+        double step = POWER_CHANGE_PER_SECOND * (now - lastCommand);
+        lastCommand = now;
+        apply(0, fl / scale, step, maxPower);
+        apply(1, bl / scale, step, maxPower);
+        apply(2, fr / scale, step, maxPower);
+        apply(3, br / scale, step, maxPower);
+        return (applied[2] + applied[3] - applied[0] - applied[1]) / 4;
     }
 
-    public void stop() { robot(0, 0, 0); }
+    private void apply(int index, double requested, double step, double limit) {
+        double previous = applied[index];
+        double next = previous + Maths.clip(requested - previous, -step, step);
+        // Reduce immediately to the new cap when battery protection activates.
+        next = Maths.clip(next, -limit, limit);
+        motors[index].setPower(next);
+        applied[index] = next;
+    }
+
+    public void stop() {
+        lastCommand = Maths.time();
+        for (int i = 0; i < motors.length; i++) {
+            DcMotorEx motor = motors[i];
+            HardwareStop.attempt(RobotConfig.DRIVE[i], () -> motor.setPower(0));
+            applied[i] = 0;
+        }
+    }
 }

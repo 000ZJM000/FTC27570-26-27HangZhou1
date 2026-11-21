@@ -49,12 +49,20 @@ public final class ShotVectorField {
     }
 
     public boolean save(int column, int row, Vector shot) {
+        return save(column, row, shot, -1, -1);
+    }
+
+    public boolean save(int column, int row, Vector shot, double battery, double pitch) {
         int index = offset(column, row);
         if (records[index] == 1 || !valid(shot)) return false;
         double[] next = records.clone();
         next[index + 1] = shot.forward;
         next[index + 2] = shot.right;
-        return write(next);
+        String id = pointId(row + 1, firstColumn + column + 1, '0');
+        if (!store.saveShot(key, next, id, battery, pitch)) return false;
+        records = next;
+        generateRefinements();
+        return true;
     }
 
     public boolean setUnreachable(int column, int row, boolean unreachable) {
@@ -145,8 +153,12 @@ public final class ShotVectorField {
     }
 
     public boolean save(Refinement point, Vector shot) {
+        return save(point, shot, -1, -1);
+    }
+
+    public boolean save(Refinement point, Vector shot, double battery, double pitch) {
         return point.corner != null && refinements[point.slot] == point && !isUnreachable(point) && valid(shot)
-                && writeRefinement(point, false, shot.forward, shot.right);
+                && writeRefinement(point, false, shot.forward, shot.right, new double[]{battery, pitch});
     }
 
     public boolean setUnreachable(Refinement point, boolean unreachable) {
@@ -154,7 +166,7 @@ public final class ShotVectorField {
         int index = point.slot * REFINE_RECORD_SIZE;
         boolean samePosition = matches(point, refinedRecords);
         return writeRefinement(point, unreachable, samePosition ? refinedRecords[index + 3] : 0,
-                samePosition ? refinedRecords[index + 4] : 0);
+                samePosition ? refinedRecords[index + 4] : 0, null);
     }
 
     private static boolean matches(Refinement point, double[] saved) {
@@ -162,7 +174,7 @@ public final class ShotVectorField {
         return saved[index + 1] == point.rightTiles && saved[index + 2] == point.forwardTiles;
     }
 
-    private boolean writeRefinement(Refinement point, boolean unreachable, double forward, double right) {
+    private boolean writeRefinement(Refinement point, boolean unreachable, double forward, double right, double[] metadata) {
         double[] next = refinedRecords.clone();
         int index = point.slot * REFINE_RECORD_SIZE;
         next[index] = unreachable ? 1 : 0;
@@ -170,8 +182,12 @@ public final class ShotVectorField {
         next[index + 2] = point.forwardTiles;
         next[index + 3] = forward;
         next[index + 4] = right;
-        if (!store.save(refinementKey, next)) return false;
+        String id = pointId(point.row + 1, point.fieldColumn, (char) ('1' + point.corner.ordinal()));
+        boolean saved = metadata == null ? store.save(refinementKey, next)
+                : store.saveShot(refinementKey, next, id, metadata[0], metadata[1]);
+        if (!saved) return false;
         refinedRecords = next;
+        generateRefinements();
         return true;
     }
 
@@ -184,16 +200,28 @@ public final class ShotVectorField {
                 int cell = row * COLUMNS + column;
                 for (Corner corner : CORNERS) {
                     int slot = cell * CORNERS.length + corner.ordinal();
-                    refinements[slot] = measured && fitsTile ? cornerPoint(slot, column, row, corner) : null;
+                    if (!measured || !fitsTile) refinements[slot] = null;
+                    else if (refinements[slot] == null) refinements[slot] = cornerPoint(slot, column, row, corner);
                 }
                 if (legacyRecords == null) continue;
                 for (int i = 0; i < LEGACY_REFINEMENTS_PER_CELL; i++) {
                     int slot = cell * LEGACY_REFINEMENTS_PER_CELL + i;
-                    legacyRefinements[slot] = measured ? storedLegacyPoint(slot, column, row) : null;
+                    legacyRefinements[slot] = measured && !hasCornerRecord(cell) ? storedLegacyPoint(slot, column, row) : null;
                 }
             }
         }
     }
+
+    private boolean hasCornerRecord(int cell) {
+        for (int i = 0; i < CORNERS.length; i++) {
+            int slot = cell * CORNERS.length + i;
+            Refinement point = refinements[slot];
+            if (point != null && (isUnreachable(point) || at(point) != null)) return true;
+        }
+        return false;
+    }
+
+    static String pointId(int row, int column, char code) { return "" + row + column + code; }
 
     private Refinement cornerPoint(int slot, int column, int row, Corner corner) {
         double tile = RobotConfig.TILE_MM;

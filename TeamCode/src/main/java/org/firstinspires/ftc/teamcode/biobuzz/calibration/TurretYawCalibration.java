@@ -7,9 +7,9 @@ import org.firstinspires.ftc.teamcode.biobuzz.PinpointPose;
 import org.firstinspires.ftc.teamcode.biobuzz.Turret;
 
 final class TurretYawCalibration {
-    private static final int PASSES = 4;
-    private static final double[] STICKS = {0.18, 0.29, 0.42, 0.58, 0.77, 1.0};
-    private static final double[] HOLDOUT = {0.21, 0.51, 1.0};
+    private static final int PASSES = 2;
+    private static final double[] STICKS = {0.29, 0.77};
+    private static final double[] HOLDOUT = {0.51};
     private final CalibrationOp op;
     private int trials;
 
@@ -17,97 +17,69 @@ final class TurretYawCalibration {
         this.op = op;
     }
 
-    void run(Drive drive, PinpointPose pose) throws InterruptedException {
-        Turret turret = new Turret(op.hardwareMap, op.store);
-        if (!turret.calibrated()) {
-            op.telemetry.log().add("云台行程待标定。运行 02 后再测耦合前馈。");
-            return;
-        }
-        if (!turret.plantIdentified()) {
-            op.telemetry.log().add("先运行 02 并通过快速稳定性验证。");
-            return;
-        }
+    boolean run(Drive drive, PinpointPose pose, Turret turret) throws InterruptedException {
+        double[] original = turret.coupling();
+        boolean saved = false;
         try {
-            turret.teachingMode(true);
-            while (op.confirm("把云台摆到最右标记，按 A 记零位。")) {
-                turret.homeAtRight();
-                if (turret.encoderReady()) break;
-                op.telemetry.log().add("等待云台编码器，保持在右端后重试。");
-            }
-            if (!op.opModeIsActive() || !turret.encoderReady()) return;
-            turret.teachingMode(false);
-            if (!op.confirm("底盘与云台将同时左右转。先测 24 次，缺数据的方向才补测。A 开始，B 停止。")) return;
             pose.update();
             if (!pose.anchor(0, 0, 0)) {
-                op.telemetry.log().add("Pinpoint 航向暂不可用。恢复后重跑 03。");
-                return;
+                op.telemetry.log().add("Pinpoint 航向暂不可用。");
+                return false;
             }
 
-            double[] original = turret.coupling();
             CouplingFit[] data = {new CouplingFit(), new CouplingFit()};
-            double[][] fits = new double[2][];
             for (int pass = 0; pass < PASSES && active(); pass++) {
                 for (int i = 0; i < STICKS.length && active(); i++) {
-                    int level = (i * 5 + pass) % STICKS.length;
+                    int level = (i + pass) % STICKS.length;
                     for (int j = 0; j < 2 && active(); j++) {
                         int side = (j + pass + i) % 2;
-                        if (fits[side] != null) continue;
                         turn(drive, pose, turret, signedStick(STICKS[level], side), 0, (pass + i) % 4, data[side]);
                     }
                 }
-                if (pass >= 1) {
-                    for (int side = 0; side < 2 && active(); side++) {
-                        if (fits[side] == null) fits[side] = data[side].fit();
-                    }
-                    if (fits[0] != null && fits[1] != null) break;
-                }
             }
-            if (!active()) return;
+            if (!active()) return false;
             double[] verified = original.clone();
-            boolean improved = false;
             for (int side = 0; side < 2 && active(); side++) {
-                double[] fit = fits[side];
+                double[] fit = data[side].fit();
                 String direction = side == 0 ? "云台左转" : "云台右转";
                 if (fit == null) {
-                    op.telemetry.log().add("%s：有效数据不足（%d 段），保留原参数。", direction, data[side].size());
-                    continue;
+                    op.telemetry.log().add("%s有效数据不足（%d 段），保留原参数。", direction, data[side].size());
+                    return false;
                 }
                 double[] proposed = original.clone();
                 System.arraycopy(fit, 0, proposed, side * 2, 2);
                 op.telemetry.log().add("%s %d 段，kV %.3f / kA %.3f", direction,
                         data[side].size(), fit[0], fit[1]);
-                if (validate(drive, pose, turret, side, original, proposed, direction)) {
-                    System.arraycopy(fit, 0, verified, side * 2, 2);
-                    improved = true;
-                }
+                Validation result = validate(drive, pose, turret, side, original, proposed, direction);
+                if (result == Validation.INCOMPLETE) return false;
+                if (result == Validation.ADOPT) System.arraycopy(fit, 0, verified, side * 2, 2);
                 turret.setCoupling(original);
             }
-            if (improved && active()) op.save(CalibrationStore.TURRET_COUPLED_DYNAMICS, verified);
+            saved = active() && op.save(CalibrationStore.TURRET_COUPLED_DYNAMICS, verified);
+            if (saved) turret.setCoupling(verified);
+            return saved;
         } finally {
             drive.stop();
-            turret.teachingMode(false);
+            turret.stop();
+            if (!saved) turret.setCoupling(original);
         }
     }
 
-    private boolean validate(Drive drive, PinpointPose pose, Turret turret, int side, double[] original,
+    private enum Validation { ADOPT, KEEP, INCOMPLETE }
+
+    private Validation validate(Drive drive, PinpointPose pose, Turret turret, int side, double[] original,
                              double[] proposed, String direction) throws InterruptedException {
         Measurements baseline = new Measurements(), candidate = new Measurements();
         double worstChange = Double.NEGATIVE_INFINITY;
-        int retry = -1;
-        for (int run = 0; run <= HOLDOUT.length && candidate.size() < HOLDOUT.length && active(); run++) {
-            int i = run < HOLDOUT.length ? run : retry;
-            if (i < 0) break;
+        for (int i = 0; i < HOLDOUT.length && active(); i++) {
             double stick = signedStick(HOLDOUT[i], side);
-            double[] scores = new double[2];
+            double[] scores = {Double.NaN, Double.NaN};
             for (int j = 0; j < 2 && active(); j++) {
                 int model = (i + j) % 2;
                 turret.setCoupling(model == 0 ? original : proposed);
                 scores[model] = turn(drive, pose, turret, stick, i % 2 == 0 ? 1 : 2, (i + 2) % 4, null);
             }
-            if (!Maths.finite(scores)) {
-                if (retry < 0) retry = i;
-                continue;
-            }
+            if (!Maths.finite(scores)) continue;
             baseline.add(scores[0]);
             candidate.add(scores[1]);
             worstChange = Math.max(worstChange, scores[1] - scores[0]);
@@ -120,7 +92,8 @@ final class TurretYawCalibration {
             op.telemetry.log().add("%s留出实测 %.2f° → %.2f°，%s", direction,
                     Math.toDegrees(oldError), Math.toDegrees(newError), accepted ? "采纳" : "保留原参数");
         } else op.telemetry.log().add("%s留出复测不足，保留原参数。", direction);
-        return accepted;
+        if (!active() || candidate.size() < HOLDOUT.length) return Validation.INCOMPLETE;
+        return accepted ? Validation.ADOPT : Validation.KEEP;
     }
 
     private double turn(Drive drive, PinpointPose pose, Turret turret, double stick, int pattern, int lane,
