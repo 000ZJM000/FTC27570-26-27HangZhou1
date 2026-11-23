@@ -15,11 +15,13 @@
   const rpmPlot = byId("rpm-profile");
   const query = { x: 0.5, y: 2.5 };
   let points = initial.points;
+  let baselinePoints = points.map(point => ({ ...point }));
   let settings = { ...fit.defaults };
   let geometry = initialGeometry;
   let selected = null;
   let model, stats, rpmLow, rpmHigh, fitFrame, fieldBounds;
   let blockedTiles = new Set();
+  let recalAnchors = [];
   let feedbackTimer;
 
   function checkedSettings(source = {}) {
@@ -33,12 +35,27 @@
     };
   }
 
+  function normalizedPoint(point) {
+    return {
+      ...point,
+      blocked: Boolean(point.blocked),
+      inactive: Boolean(point.inactive),
+      weight: Number.isFinite(point.weight) ? point.weight : 1
+    };
+  }
+
   function applyProject(project) {
     if (![1, 2].includes(project?.version) || !Array.isArray(project.points) ||
         project.points.length > 1200 || !project.points.every(fit.validPoint)) {
       throw new Error("方案中缺少有效的 06 测点。");
     }
-    points = project.points.map(point => ({ ...point, blocked: Boolean(point.blocked), inactive: Boolean(point.inactive) }));
+    points = project.points.map(normalizedPoint);
+    if (Array.isArray(project.baselinePoints) && project.baselinePoints.length <= 1200 &&
+        project.baselinePoints.every(fit.validPoint)) {
+      baselinePoints = project.baselinePoints.map(normalizedPoint);
+    } else if (points.some(point => fit.usable(point) && /[1-4a-h]$/.test(point.id))) {
+      baselinePoints = points.map(point => ({ ...point }));
+    }
     settings = checkedSettings(project.settings || {});
     geometry = fit.checkedGeometry(project.geometry || initialGeometry);
     selected = null;
@@ -118,7 +135,9 @@
     renderSelection();
     draw();
     if (persist) {
-      try { localStorage.setItem(storageKey, JSON.stringify({ version: 2, points, settings, geometry })); } catch { /* file export is still available */ }
+      try {
+        localStorage.setItem(storageKey, JSON.stringify({ version: 2, points, baselinePoints, settings, geometry }));
+      } catch { /* file export is still available */ }
     }
   }
 
@@ -464,7 +483,7 @@
   byId("save").addEventListener("click", () => {
     if (!model) return message("至少需要一个参与拟合的实测点。");
     download("shot_model.json", JSON.stringify({
-      version: 2, kind: "biobuzz-shot-model", points, settings, geometry, model, equation: equationText(), stats
+      version: 2, kind: "biobuzz-shot-model", points, baselinePoints, settings, geometry, model, equation: equationText(), stats
     }, null, 2), "application/json");
   });
   byId("copy-equations").addEventListener("click", async () => {
@@ -481,6 +500,49 @@
     }
   });
 
+  function parseInputRecords(text, fallbackGeometry) {
+    if (text.startsWith("{")) {
+      const project = JSON.parse(text);
+      if (![1, 2].includes(project?.version) || !Array.isArray(project.points) ||
+          project.points.length > 1200 || !project.points.every(fit.validPoint)) {
+        throw new Error("方案中缺少有效的 06 测点。");
+      }
+      return {
+        incomingPoints: project.points.map(normalizedPoint),
+        incomingGeometry: project.geometry ? fit.checkedGeometry(project.geometry) : fallbackGeometry,
+        project
+      };
+    }
+    const parsed = fit.parse(text, fallbackGeometry);
+    if (parsed.errors.length) throw new Error("这些点位无法识别 " + parsed.errors.slice(0, 4).join("、"));
+    if (!parsed.points.length) throw new Error("请粘贴至少一条 07 点位，例如 110:-4675/3100。");
+    return {
+      incomingPoints: parsed.points.map(normalizedPoint),
+      incomingGeometry: fallbackGeometry,
+      project: null
+    };
+  }
+
+  function smartSelectAnchors(incomingUsable) {
+    const baseMap = new Map(baselinePoints.filter(fit.usable).map(point => [point.id, point]));
+    const changed = incomingUsable.filter(point => {
+      const ref = baseMap.get(point.id);
+      return !ref || Math.abs(fit.wrap(point.angle - ref.angle)) > 0.05 || Math.abs(point.rpm - ref.rpm) > 1;
+    });
+    if (incomingUsable.length <= 8) return incomingUsable;
+    if (changed.length >= 1 && changed.length <= 12) return changed;
+    const centers = incomingUsable.filter(point => point.id[2] === "0");
+    return centers.length ? centers : incomingUsable;
+  }
+
+  function getRecalOptions() {
+    return {
+      strategy: byId("recal-strategy").value,
+      angleMode: byId("recal-angle-mode").value,
+      rpmOrder: Number(byId("recal-rpm-order").value)
+    };
+  }
+
   const dialog = byId("import-dialog");
   byId("open-import").addEventListener("click", () => { byId("import-error").textContent = ""; dialog.showModal(); });
   byId("close-import").addEventListener("click", () => dialog.close());
@@ -494,10 +556,23 @@
   byId("import-form").addEventListener("submit", event => {
     event.preventDefault();
     const text = byId("import-text").value.trim();
+    const asRecalibrate = byId("import-recalibrate").checked;
     try {
-      let count;
-      if (text.startsWith("{")) {
-        applyProject(JSON.parse(text)); count = points.length;
+      let notice;
+      if (asRecalibrate) {
+        const { incomingPoints, incomingGeometry } = parseInputRecords(text, geometry);
+        const usableIncoming = incomingPoints.filter(fit.usable);
+        if (!usableIncoming.length) throw new Error("导入数据中没有可用于少点校准的有效实测点。");
+        const anchorSubset = smartSelectAnchors(usableIncoming);
+        const result = fit.recalibrate(baselinePoints, anchorSubset, getRecalOptions(), settings, incomingGeometry);
+        if (!result) throw new Error("少点迁移校准失败，请检查当前基准与锚点数据。");
+        geometry = incomingGeometry;
+        points = result.points.map(point => ({ ...point }));
+        notice = "已用 " + result.anchorCount + " 个新角度锚点校准全部 " + result.calibratedCount +
+          " 个精测点（平均 ΔRPM " + signed(result.summary.meanDeltaRpm, 0) + "）。";
+      } else if (text.startsWith("{")) {
+        applyProject(JSON.parse(text));
+        notice = "已导入 " + points.length + " 条记录。";
       } else {
         const parsed = fit.parse(text, geometry);
         if (parsed.errors.length) throw new Error("这些点位无法识别 " + parsed.errors.slice(0, 4).join("、"));
@@ -505,18 +580,325 @@
         const merged = new Map(points.map(point => [pointKey(point), point]));
         for (const point of parsed.points) merged.set(pointKey(point), point);
         points = [...merged.values()].sort((a, b) => a.id.localeCompare(b.id));
-        count = parsed.points.length;
+        notice = "已导入 " + parsed.points.length + " 条记录。";
       }
       selectPoint(null);
       syncControls();
       updateFit(true);
       byId("import-text").value = "";
+      byId("import-recalibrate").checked = false;
       dialog.close();
-      message("已导入 " + count + " 条记录。");
+      message(notice);
     } catch (error) {
       byId("import-error").textContent = error.message;
     }
   });
+
+  const recalDialog = byId("recalibrate-dialog");
+
+  function renderRecalBaselineInfo() {
+    const usableBase = baselinePoints.filter(fit.usable);
+    const cornerCount = usableBase.filter(point => point.id[2] !== "0").length;
+    byId("recal-baseline-info").textContent =
+      "当前 24 点基准：" + usableBase.length + " 个可用点（含 " + cornerCount + " 个精测角点）";
+  }
+
+  function buildRecalAnchors(preferredIds = null, overridePoints = null) {
+    const baseById = new Map(baselinePoints.filter(fit.usable).map(point => [point.id, point]));
+    const currentById = new Map(points.filter(fit.usable).map(point => [point.id, point]));
+    const overrideById = overridePoints
+      ? new Map(overridePoints.filter(fit.usable).map(point => [point.id, point]))
+      : new Map();
+    const ids = [];
+    const seen = new Set();
+    for (const point of baselinePoints) {
+      if (fit.usable(point) && point.id[2] === "0" && !seen.has(point.id)) {
+        seen.add(point.id);
+        ids.push(point.id);
+      }
+    }
+    if (overridePoints) {
+      for (const point of overridePoints) {
+        if (fit.usable(point) && !seen.has(point.id)) {
+          seen.add(point.id);
+          ids.push(point.id);
+        }
+      }
+    }
+    for (const point of points) {
+      if (fit.usable(point) && !seen.has(point.id)) {
+        const ref = baseById.get(point.id);
+        const modified = !ref || Math.abs(fit.wrap(point.angle - ref.angle)) > 0.05 || Math.abs(point.rpm - ref.rpm) > 1;
+        if (point.id[2] === "0" || modified) {
+          seen.add(point.id);
+          ids.push(point.id);
+        }
+      }
+    }
+    ids.sort((a, b) => a.localeCompare(b));
+    recalAnchors = ids.map(id => {
+      const ref = baseById.get(id);
+      const ov = overrideById.get(id);
+      const cur = currentById.get(id);
+      const source = ov || cur || ref;
+      return {
+        id,
+        name: fit.pointName(id),
+        x: source.x,
+        y: source.y,
+        weight: source.weight || 1,
+        oldAngle: ref ? ref.angle : null,
+        oldRpm: ref ? ref.rpm : null,
+        newAngle: Number(source.angle.toFixed(2)),
+        newRpm: Math.round(source.rpm),
+        checked: false
+      };
+    });
+    if (preferredIds) {
+      recalAnchors.forEach(row => { row.checked = preferredIds.has(row.id); });
+    } else {
+      const changed = recalAnchors.filter(row => row.oldAngle !== null &&
+        (Math.abs(fit.wrap(row.newAngle - row.oldAngle)) > 0.05 || Math.abs(row.newRpm - row.oldRpm) > 1));
+      const useChanged = changed.length > 0 && changed.length < recalAnchors.length;
+      recalAnchors.forEach(row => {
+        row.checked = useChanged ? changed.includes(row) : row.id[2] === "0";
+      });
+    }
+    renderRecalAnchors();
+    updateRecalPreview();
+  }
+
+  function anchorDeltaText(row) {
+    if (row.oldAngle === null) return "新增锚点";
+    if (!Number.isFinite(row.newAngle) || !Number.isFinite(row.newRpm)) return "—";
+    return signed(fit.wrap(row.newAngle - row.oldAngle), 2) + "° / " + signed(row.newRpm - row.oldRpm, 0);
+  }
+
+  function renderRecalAnchors() {
+    const fragment = document.createDocumentFragment();
+    for (const row of recalAnchors) {
+      const tr = document.createElement("tr");
+      const checkTd = document.createElement("td");
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = row.checked;
+      check.ariaLabel = "将 " + row.id + " 作为锚点";
+      checkTd.append(check);
+
+      const idTd = document.createElement("td");
+      idTd.textContent = row.id + " " + row.name;
+
+      const posTd = document.createElement("td");
+      posTd.textContent = format(row.x, 3) + " / " + format(row.y, 3);
+
+      const oldTd = document.createElement("td");
+      oldTd.textContent = row.oldAngle === null ? "无基准" : format(row.oldAngle, 2) + "° / " + format(row.oldRpm, 0);
+
+      const angleTd = document.createElement("td");
+      const angleInput = document.createElement("input");
+      angleInput.type = "number";
+      angleInput.min = "-180";
+      angleInput.max = "180";
+      angleInput.step = "0.1";
+      angleInput.value = Number.isFinite(row.newAngle) ? row.newAngle : "";
+      angleTd.append(angleInput);
+
+      const rpmTd = document.createElement("td");
+      const rpmInput = document.createElement("input");
+      rpmInput.type = "number";
+      rpmInput.min = "1";
+      rpmInput.max = "20000";
+      rpmInput.step = "25";
+      rpmInput.value = Number.isFinite(row.newRpm) ? row.newRpm : "";
+      rpmTd.append(rpmInput);
+
+      const deltaTd = document.createElement("td");
+      deltaTd.className = "delta-badge";
+      deltaTd.textContent = anchorDeltaText(row);
+
+      check.addEventListener("change", () => {
+        row.checked = check.checked;
+        updateRecalPreview();
+      });
+      angleInput.addEventListener("input", () => {
+        row.newAngle = angleInput.value === "" ? NaN : angleInput.valueAsNumber;
+        if (Number.isFinite(row.newAngle) && row.oldAngle !== null && Math.abs(fit.wrap(row.newAngle - row.oldAngle)) > 0.05) {
+          row.checked = true;
+          check.checked = true;
+        }
+        deltaTd.textContent = anchorDeltaText(row);
+        updateRecalPreview();
+      });
+      rpmInput.addEventListener("input", () => {
+        row.newRpm = rpmInput.value === "" ? NaN : rpmInput.valueAsNumber;
+        if (Number.isFinite(row.newRpm) && row.oldRpm !== null && Math.abs(row.newRpm - row.oldRpm) > 1) {
+          row.checked = true;
+          check.checked = true;
+        }
+        deltaTd.textContent = anchorDeltaText(row);
+        updateRecalPreview();
+      });
+
+      tr.append(checkTd, idTd, posTd, oldTd, angleTd, rpmTd, deltaTd);
+      fragment.append(tr);
+    }
+    byId("recal-anchors-body").replaceChildren(fragment);
+  }
+
+  function activeAnchorPoints() {
+    const valid = [];
+    for (const row of recalAnchors) {
+      if (!row.checked) continue;
+      const point = {
+        id: row.id, x: row.x, y: row.y,
+        angle: row.newAngle, rpm: row.newRpm,
+        blocked: false, inactive: false, weight: row.weight || 1
+      };
+      if (fit.validPoint(point) && fit.usable(point)) valid.push(point);
+    }
+    return valid;
+  }
+
+  function updateRecalPreview() {
+    const anchors = activeAnchorPoints();
+    const errorEl = byId("recal-error");
+    const applyBtn = byId("recal-apply");
+    const previewBody = byId("recal-preview-body");
+    if (!anchors.length) {
+      errorEl.textContent = "请至少勾选 1 个有效的新角度实测锚点，并填入射向与 RPM。";
+      applyBtn.disabled = true;
+      byId("recal-summary").textContent = "等待有效锚点…";
+      previewBody.replaceChildren();
+      return;
+    }
+    const result = fit.recalibrate(baselinePoints, anchors, getRecalOptions(), settings, geometry);
+    if (!result) {
+      errorEl.textContent = "当前基准数据中缺少可迁移的实测点。";
+      applyBtn.disabled = true;
+      byId("recal-summary").textContent = "无法计算迁移结果。";
+      previewBody.replaceChildren();
+      return;
+    }
+    errorEl.textContent = "";
+    applyBtn.disabled = false;
+    const s = result.summary;
+    const [r0, sr] = s.rNorm;
+    const rpmExpr = s.rpmCoeffs.map((value, i) =>
+      (value < 0 ? " − " : i > 0 ? " + " : "") + format(Math.abs(value), 1) + (i === 0 ? "" : i === 1 ? "d" : "d^" + i)).join("");
+    const angleText = s.angleMode === "keep" ? "保持原射向不变"
+      : s.effAngleOrder === 0 ? "射向整体平移 " + signed(s.meanDeltaAngle, 2) + "°"
+      : "Δθ(d) = " + signed(s.angleCoeffs[0], 2) + "°" +
+        ((s.angleCoeffs[1] || 0) >= 0 ? " + " : " − ") + format(Math.abs(s.angleCoeffs[1] || 0), 2) + "°d";
+    byId("recal-summary").textContent =
+      "锚点：" + result.anchorCount + " 点 → 待更新全部测点：" + result.calibratedCount + " 点" +
+      (s.useCornerModelAsBaseline ? "（检测到格心已覆盖：已自动改用 24 点角点拟合面作为旧基准）" : "") +
+      "\n平均偏移：射向 " + signed(s.meanDeltaAngle, 2) + "° · 转速 " + signed(s.meanDeltaRpm, 0) + " RPM" +
+      "（近端 " + signed(s.nearDeltaRpm, 0) + " → 远端 " + signed(s.farDeltaRpm, 0) + " RPM）" +
+      "\nΔRPM = " + rpmExpr + "  (d = (r − " + format(r0, 3) + ")/" + format(sr, 3) + ")  |  " + angleText;
+
+    const fragment = document.createDocumentFragment();
+    for (const row of result.comparisons) {
+      const tr = document.createElement("tr");
+      const values = [
+        row.id + " " + row.name,
+        format(row.x, 3) + " / " + format(row.y, 3),
+        row.oldAngle === null ? "—" : format(row.oldAngle, 2) + "° / " + format(row.oldRpm, 0),
+        format(row.newAngle, 2) + "° / " + format(row.newRpm, 0),
+        row.dAngle === null ? "新增" : signed(row.dAngle, 2) + "° / " + signed(row.dRpm, 0),
+        row.source
+      ];
+      values.forEach((value, idx) => {
+        const td = document.createElement("td");
+        td.textContent = value;
+        if (idx === 4) {
+          td.className = "delta-badge" + (Math.abs(row.dRpm || 0) >= 400 || Math.abs(row.dAngle || 0) >= 8 ? " warn" : "");
+        }
+        tr.append(td);
+      });
+      fragment.append(tr);
+    }
+    previewBody.replaceChildren(fragment);
+  }
+
+  function applyRecalPaste(text) {
+    const errorEl = byId("recal-error");
+    try {
+      const { incomingPoints, incomingGeometry } = parseInputRecords(text.trim(), geometry);
+      const usableIncoming = incomingPoints.filter(fit.usable);
+      if (!usableIncoming.length) throw new Error("未找到可用的实测点。");
+      geometry = incomingGeometry;
+      const chosen = smartSelectAnchors(usableIncoming);
+      buildRecalAnchors(new Set(chosen.map(point => point.id)), usableIncoming);
+      errorEl.textContent = "";
+      message("已解析 " + usableIncoming.length + " 个测点，自动选中 " + chosen.length + " 个作为新角度锚点。");
+    } catch (error) {
+      errorEl.textContent = error.message;
+    }
+  }
+
+  byId("open-recalibrate").addEventListener("click", () => {
+    byId("recal-error").textContent = "";
+    renderRecalBaselineInfo();
+    buildRecalAnchors();
+    recalDialog.showModal();
+  });
+  byId("close-recalibrate").addEventListener("click", () => recalDialog.close());
+  byId("recal-cancel").addEventListener("click", () => recalDialog.close());
+  byId("recal-extract-centers").addEventListener("click", () => buildRecalAnchors(new Set(
+    recalAnchors.filter(row => row.id[2] === "0").map(row => row.id)
+  )));
+  byId("recal-set-baseline").addEventListener("click", () => {
+    baselinePoints = points.map(point => ({ ...point }));
+    updateFit(true);
+    renderRecalBaselineInfo();
+    buildRecalAnchors();
+    message("已将当前表格数据锁定为 24 点迁移基准。");
+  });
+  byId("recal-restore-baseline").addEventListener("click", () => {
+    points = baselinePoints.map(point => ({ ...point }));
+    selectPoint(null);
+    updateFit(true);
+    buildRecalAnchors();
+    message("已还原为 24 点迁移基准。");
+  });
+  byId("recal-parse-btn").addEventListener("click", () => applyRecalPaste(byId("recal-paste").value));
+  byId("recal-file").addEventListener("change", async event => {
+    const file = event.target.files[0];
+    if (!file) return;
+    const text = await file.text();
+    byId("recal-paste").value = text;
+    event.target.value = "";
+    applyRecalPaste(text);
+  });
+  for (const id of ["recal-strategy", "recal-angle-mode", "recal-rpm-order"]) {
+    byId(id).addEventListener("change", updateRecalPreview);
+  }
+  byId("recal-apply").addEventListener("click", () => {
+    const anchors = activeAnchorPoints();
+    const result = fit.recalibrate(baselinePoints, anchors, getRecalOptions(), settings, geometry);
+    if (!result) {
+      byId("recal-error").textContent = "无法完成迁移校准，请检查锚点与基准数据。";
+      return;
+    }
+    points = result.points.map(point => ({ ...point }));
+    selectPoint(null);
+    updateFit(true);
+    recalDialog.close();
+    message("已用 " + result.anchorCount + " 个新角度锚点校准全部 " + result.calibratedCount +
+      " 个精测点（平均 ΔRPM " + signed(result.summary.meanDeltaRpm, 0) + "）。");
+  });
+
+  if (!("closedBy" in HTMLDialogElement.prototype)) {
+    const outside = (e, d) => {
+      const r = d.getBoundingClientRect();
+      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+    };
+    for (const d of document.querySelectorAll('dialog[closedby="any"]')) {
+      let pressedOutside = false;
+      d.addEventListener("pointerdown", e => { pressedOutside = outside(e, d); });
+      d.addEventListener("pointerup", e => { if (pressedOutside && outside(e, d)) d.close(); });
+    }
+  }
 
   syncControls();
   updateFit();

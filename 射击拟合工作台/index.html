@@ -14,6 +14,7 @@
     <header class="header">
       <div><div class="source">BIOBUZZ / 06 半场校准</div><h1>射击拟合工作台</h1></div>
       <div class="actions">
+        <button id="open-recalibrate" type="button">新角度少点校准</button>
         <button id="open-import" type="button">导入测点</button>
         <button id="save" class="primary" type="button">保存方案</button>
       </div>
@@ -114,19 +115,104 @@
     </section>
   </main>
 
-  <dialog id="import-dialog" aria-labelledby="import-title">
+  <dialog id="import-dialog" closedby="any" aria-labelledby="import-title">
     <form id="import-form">
       <div class="section-head"><h2 id="import-title">导入测点或方案</h2><button id="close-import" class="plain" type="button">关闭</button></div>
       <label class="import-text">粘贴 07 截图文字或方案 JSON
         <textarea id="import-text" rows="9" spellcheck="false" placeholder="110:-4675/3100 111:-4232/3200 120:?!"></textarea>
       </label>
       <p>可直接导入车端的 shot_records.json 或已保存的 shot_model.json。</p>
+      <label class="check import-recal-check"><input id="import-recalibrate" type="checkbox"> 作为新角度少点锚点，自动迁移校准当前 24 点精测数据</label>
       <output id="import-error" class="import-error" role="alert"></output>
       <div class="actions import-actions">
         <label class="file-label">选择文件<input id="import-file" type="file" accept=".txt,.json"></label>
         <button type="submit" class="primary">导入</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="recalibrate-dialog" class="recal-dialog" closedby="any" aria-labelledby="recalibrate-title">
+    <div class="section-head">
+      <div>
+        <h2 id="recalibrate-title">定角度 · 少点迁移校准（6点校准24点）</h2>
+        <p>在车上调整固定俯仰角后，只需重测少数锚点（如 6 个格心 110–610），工作台会按新旧基准差异与径向转速梯度自动迁移全部 24 点精测数据。</p>
+      </div>
+      <button id="close-recalibrate" class="plain" type="button">关闭</button>
+    </div>
+
+    <div class="recal-toolbar">
+      <span id="recal-baseline-info" class="muted"></span>
+      <div class="actions">
+        <button id="recal-extract-centers" type="button">提取格心锚点 (**0)</button>
+        <button id="recal-set-baseline" type="button">将当前表设为基准</button>
+        <button id="recal-restore-baseline" type="button">还原到 24 点基准</button>
+      </div>
+    </div>
+
+    <div class="recal-paste-row">
+      <textarea id="recal-paste" rows="2" spellcheck="false" autofocus placeholder="粘贴新角度实测数据（如 110:-4580/3225 210:-6290/3125 ...）或读取车端 shot_records.json"></textarea>
+      <div class="recal-paste-actions">
+        <label class="file-label">读取 JSON/TXT<input id="recal-file" type="file" accept=".txt,.json"></label>
+        <button id="recal-parse-btn" type="button">填入锚点表</button>
+      </div>
+    </div>
+
+    <div class="controls recal-controls">
+      <label>迁移算法
+        <select id="recal-strategy">
+          <option value="local-anchor">格心锚定 + 径向梯度迁移（推荐：保留四角微差）</option>
+          <option value="global-curve">全局平滑径向曲线迁移（抗单点波动）</option>
+          <option value="residual-stack">新角度曲线 + 叠加旧24点残差（车上已覆盖格心时）</option>
+        </select>
+      </label>
+      <label>射向处理
+        <select id="recal-angle-mode">
+          <option value="auto">跟随新锚点拟合射向偏移 Δθ(r)</option>
+          <option value="offset">射向仅做统一零位平移 Δθ₀</option>
+          <option value="keep">保持原 24 点射向不变（仅校准 RPM）</option>
+        </select>
+      </label>
+      <label>RPM 径向阶数
+        <select id="recal-rpm-order">
+          <option value="2">二次径向 ΔRPM(r)（5–6点推荐）</option>
+          <option value="1">一次线性径向 ΔRPM(r)（2–4点）</option>
+          <option value="0">常数整体平移 ΔRPM</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="recal-block-head">
+      <h3>1. 新角度实测锚点</h3>
+      <span class="muted">勾选参与拟合的点，可直接修改实测射向与 RPM</span>
+    </div>
+    <div class="recal-table-wrap">
+      <table class="recal-anchor-table">
+        <thead>
+          <tr><th>锚点</th><th>点位</th><th>右 / 前</th><th>原基准（射向 / RPM）</th><th>新射向 °</th><th>新转速 RPM</th><th>偏移 Δθ / ΔRPM</th></tr>
+        </thead>
+        <tbody id="recal-anchors-body"></tbody>
+      </table>
+    </div>
+
+    <div class="recal-block-head">
+      <h3>2. 24 点迁移校准预览</h3>
+      <span class="muted">实时计算：应用前可核对所有点位变化</span>
+    </div>
+    <pre id="recal-summary"></pre>
+    <div class="recal-table-wrap">
+      <table>
+        <thead>
+          <tr><th>点位</th><th>右 / 前</th><th>原基准（射向 / RPM）</th><th>校准后（射向 / RPM）</th><th>迁移量 Δθ / ΔRPM</th><th>方式</th></tr>
+        </thead>
+        <tbody id="recal-preview-body"></tbody>
+      </table>
+    </div>
+
+    <output id="recal-error" class="import-error" role="alert"></output>
+    <div class="actions import-actions">
+      <button id="recal-cancel" type="button">取消</button>
+      <button id="recal-apply" type="button" class="primary">应用校准到全部精测点</button>
+    </div>
   </dialog>
 </body>
 </html>

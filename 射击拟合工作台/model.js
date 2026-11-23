@@ -261,7 +261,190 @@
       cross(point, points[(index + 1) % points.length], local) >= -1e-8);
   }
 
-  const api = { defaults, defaultGeometry, checkedGeometry, parse, validPoint, usable, pointName, wrap, fit, predict, error, diagnostics, supported };
+  function canonicalPivot(point, geometry, goal) {
+    const right = point.x >= 3, sign = right ? -1 : 1;
+    const pivotX = point.x + geometry.turretRightMm / geometry.tileMm;
+    const pivotY = point.y + geometry.turretForwardMm / geometry.tileMm;
+    const localX = right ? 6 - pivotX : pivotX;
+    const localAngle = point.angle === null ? null : right ? -point.angle : point.angle;
+    const r = goal ? Math.hypot(localX - goal[0], pivotY - goal[1]) : 0;
+    return { right, sign, pivotX, pivotY, localX, localAngle, r };
+  }
+
+  function recalibrate(baselinePoints, anchorPoints, options = {}, settings = defaults, inputGeometry = defaultGeometry) {
+    const strategy = options.strategy || "local-anchor";
+    const angleMode = options.angleMode || "auto";
+    const rpmOrder = Number.isFinite(options.rpmOrder) ? Math.max(0, Math.min(2, Math.round(options.rpmOrder))) : 2;
+    const usableBase = (baselinePoints || []).filter(usable);
+    const usableAnchors = (anchorPoints || []).filter(usable);
+    if (!usableAnchors.length || !usableBase.length) return null;
+
+    const geometry = checkedGeometry(inputGeometry);
+    const baseModel = fit(baselinePoints, settings, geometry);
+    const anchorById = new Map(usableAnchors.map(point => [point.id, point]));
+    const baseById = new Map(usableBase.map(point => [point.id, point]));
+    const nonAnchorBase = usableBase.filter(point => !anchorById.has(point.id));
+    const nonAnchorModel = nonAnchorBase.length >= 3 ? fit(nonAnchorBase, settings, geometry) : null;
+
+    const matchedCount = usableAnchors.filter(a => baseById.has(a.id)).length;
+    const allMatchedIdentical = matchedCount > 0 && usableAnchors.every(a => {
+      const b = baseById.get(a.id);
+      return !b || (Math.abs(wrap(a.angle - b.angle)) < 1e-6 && Math.abs(a.rpm - b.rpm) < 1e-6);
+    });
+    const useCornerModelAsBaseline = allMatchedIdentical && Boolean(nonAnchorModel);
+    const refModel = useCornerModelAsBaseline ? nonAnchorModel : (baseModel || fit(usableAnchors, settings, geometry));
+    const goal = refModel ? refModel.goal : [2, 2.5];
+
+    const anchorData = usableAnchors.map(a => {
+      const ca = canonicalPivot(a, geometry, goal);
+      const b = !useCornerModelAsBaseline ? baseById.get(a.id) : null;
+      let refLocalAngle, refRpm;
+      if (b && (b.x >= 3) === (a.x >= 3)) {
+        const cb = canonicalPivot(b, geometry, goal);
+        refLocalAngle = cb.localAngle;
+        refRpm = b.rpm;
+      } else if (refModel) {
+        const pred = predict(refModel, a.x, a.y);
+        refLocalAngle = ca.sign * wrap(pred.angle - refModel.angleTrim);
+        refRpm = pred.rpm;
+      } else {
+        refLocalAngle = ca.localAngle;
+        refRpm = a.rpm;
+      }
+      const dAngle = wrap(ca.localAngle - refLocalAngle);
+      const dRpm = a.rpm - refRpm;
+      return { anchor: a, ...ca, refLocalAngle, refRpm, dAngle, dRpm, weight: a.weight > 0 ? a.weight : 1 };
+    });
+
+    const rNorm = normalization(anchorData, "r");
+    const rValues = anchorData.map(d => d.r);
+    const rMin = Math.min(...rValues), rMax = Math.max(...rValues), rSpan = rMax - rMin;
+    const effRpmOrder = anchorData.length <= 1 || rSpan < 0.35 ? 0
+      : anchorData.length <= 3 || rSpan < 1.1 ? Math.min(1, rpmOrder)
+      : Math.min(2, rpmOrder, anchorData.length - 1);
+    const rpmPowers = Array.from({ length: effRpmOrder + 1 }, (_, i) => i);
+    const rpmPenalties = [1e-9, 0.12, 0.48].slice(0, effRpmOrder + 1);
+    const rpmCoeffs = leastSquares(anchorData, d => rpmPowers.map(p => normalized(d.r, rNorm) ** p),
+      d => d.dRpm, rpmPenalties) || [0];
+    const evalDeltaRpm = r => rpmCoeffs.reduceRight((sum, c) => sum * normalized(r, rNorm) + c, 0);
+
+    const totalWeight = anchorData.reduce((s, d) => s + d.weight, 0);
+    const meanDeltaAngle = anchorData.reduce((s, d) => s + d.weight * d.dAngle, 0) / totalWeight;
+    const meanDeltaRpm = anchorData.reduce((s, d) => s + d.weight * d.dRpm, 0) / totalWeight;
+
+    let effAngleOrder, angleCoeffs, evalDeltaAngle;
+    if (angleMode === "keep") {
+      effAngleOrder = -1;
+      angleCoeffs = [0];
+      evalDeltaAngle = () => 0;
+    } else if (angleMode === "offset" || anchorData.length <= 2 || rSpan < 0.5) {
+      effAngleOrder = 0;
+      angleCoeffs = [meanDeltaAngle];
+      evalDeltaAngle = () => meanDeltaAngle;
+    } else {
+      effAngleOrder = 1;
+      angleCoeffs = leastSquares(anchorData, d => [1, normalized(d.r, rNorm)],
+        d => d.dAngle, [1e-9, 0.25]) || [meanDeltaAngle, 0];
+      evalDeltaAngle = r => angleCoeffs[0] + (angleCoeffs[1] || 0) * normalized(r, rNorm);
+    }
+
+    const anchorModel = strategy === "residual-stack"
+      ? fit(usableAnchors, {
+        ...settings,
+        angleOrder: Math.min(1, Math.max(0, settings.angleOrder)),
+        rpmOrder: Math.min(2, settings.rpmOrder)
+      }, geometry)
+      : null;
+
+    const anchorDataById = new Map(anchorData.map(d => [d.anchor.id, d]));
+    const existingIds = new Set(baselinePoints.map(p => p.id));
+    const comparisons = [];
+    const calibratedPoints = baselinePoints.map(p => {
+      if (p.angle === null || p.blocked || p.inactive) return { ...p };
+      const cp = canonicalPivot(p, geometry, goal);
+      const direct = anchorDataById.get(p.id);
+      let newAngle, newRpm, source;
+      if (direct && (direct.anchor.x >= 3) === (p.x >= 3) && strategy !== "global-curve") {
+        newRpm = Math.max(1, Math.min(20000, Math.round(direct.anchor.rpm)));
+        newAngle = angleMode === "keep" ? p.angle
+          : angleMode === "offset" ? Number(wrap(p.angle + cp.sign * evalDeltaAngle(cp.r)).toFixed(2))
+          : Number(direct.anchor.angle.toFixed(2));
+        source = "新锚点直写";
+      } else if (strategy === "residual-stack" && anchorModel && refModel) {
+        const oldPred = predict(refModel, p.x, p.y), newPred = predict(anchorModel, p.x, p.y);
+        const resAngle = wrap(p.angle - oldPred.angle), resRpm = p.rpm - oldPred.rpm;
+        newRpm = Math.max(1, Math.min(20000, Math.round(newPred.rpm + resRpm)));
+        newAngle = angleMode === "keep" ? p.angle
+          : angleMode === "offset" ? Number(wrap(p.angle + cp.sign * evalDeltaAngle(cp.r)).toFixed(2))
+          : Number(wrap(newPred.angle + resAngle).toFixed(2));
+        source = "新曲线+旧残差";
+      } else if (strategy === "local-anchor") {
+        const centerId = p.id.slice(0, 2) + "0";
+        const cellAnchor = anchorDataById.get(centerId);
+        if (cellAnchor && cellAnchor.right === cp.right) {
+          const dRpm = cellAnchor.dRpm + (evalDeltaRpm(cp.r) - evalDeltaRpm(cellAnchor.r));
+          const dAngleLocal = angleMode === "keep" ? 0
+            : angleMode === "offset" ? evalDeltaAngle(cp.r)
+            : cellAnchor.dAngle + (evalDeltaAngle(cp.r) - evalDeltaAngle(cellAnchor.r));
+          newRpm = Math.max(1, Math.min(20000, Math.round(p.rpm + dRpm)));
+          newAngle = Number(wrap(p.angle + cp.sign * dAngleLocal).toFixed(2));
+          source = "同格锚定+径向";
+        } else {
+          newRpm = Math.max(1, Math.min(20000, Math.round(p.rpm + evalDeltaRpm(cp.r))));
+          newAngle = Number(wrap(p.angle + cp.sign * evalDeltaAngle(cp.r)).toFixed(2));
+          source = "径向曲线迁移";
+        }
+      } else {
+        newRpm = Math.max(1, Math.min(20000, Math.round(p.rpm + evalDeltaRpm(cp.r))));
+        newAngle = Number(wrap(p.angle + cp.sign * evalDeltaAngle(cp.r)).toFixed(2));
+        source = direct ? "全局曲线(锚点)" : "全局曲线迁移";
+      }
+      comparisons.push({
+        id: p.id, name: pointName(p.id), x: p.x, y: p.y,
+        oldAngle: p.angle, oldRpm: p.rpm, newAngle, newRpm,
+        dAngle: wrap(newAngle - p.angle), dRpm: newRpm - p.rpm, source
+      });
+      return { ...p, angle: newAngle, rpm: newRpm };
+    });
+
+    for (const a of usableAnchors) {
+      if (existingIds.has(a.id)) continue;
+      const newAngle = Number(a.angle.toFixed(2));
+      const newRpm = Math.max(1, Math.min(20000, Math.round(a.rpm)));
+      calibratedPoints.push({ ...a, angle: newAngle, rpm: newRpm });
+      comparisons.push({
+        id: a.id, name: pointName(a.id), x: a.x, y: a.y,
+        oldAngle: null, oldRpm: null, newAngle, newRpm,
+        dAngle: null, dRpm: null, source: "新增锚点"
+      });
+    }
+    calibratedPoints.sort((a, b) => a.id.localeCompare(b.id));
+
+    return {
+      points: calibratedPoints,
+      comparisons,
+      anchorCount: usableAnchors.length,
+      calibratedCount: comparisons.length,
+      summary: {
+        meanDeltaAngle,
+        meanDeltaRpm,
+        nearDeltaRpm: evalDeltaRpm(rMin),
+        farDeltaRpm: evalDeltaRpm(rMax),
+        rMin,
+        rMax,
+        rNorm,
+        rpmCoeffs,
+        angleCoeffs,
+        effRpmOrder,
+        effAngleOrder,
+        strategy,
+        angleMode,
+        useCornerModelAsBaseline
+      }
+    };
+  }
+
+  const api = { defaults, defaultGeometry, checkedGeometry, parse, validPoint, usable, pointName, wrap, fit, predict, error, diagnostics, supported, recalibrate };
   globalThis.ShotFit = api;
   if (typeof module === "object" && module.exports) module.exports = api;
 })();

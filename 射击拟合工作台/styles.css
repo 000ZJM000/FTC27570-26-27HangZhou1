@@ -104,7 +104,24 @@ tr[data-selected=true] { background: #233d40; }
 tr[data-blocked=true] td { color: var(--muted); }
 .large-residual { color: var(--amber); }
 dialog { width: min(92vw, 580px); background: var(--panel); border: 1px solid var(--stroke); border-radius: 10px; padding: 18px; color: var(--text); }
-dialog::backdrop { background: #05080bba; }
+dialog:modal { overscroll-behavior: contain; }
+dialog::backdrop { background: #05080bba; overflow: hidden; overscroll-behavior: contain; }
+dialog.recal-dialog { width: min(95vw, 940px); max-height: 90vh; overflow: auto; }
+.recal-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 10px 0 8px; }
+.recal-toolbar .muted { color: var(--muted); font-size: 12px; }
+.recal-paste-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: stretch; margin-bottom: 10px; }
+.recal-paste-row textarea { min-height: 54px; margin-top: 0; }
+.recal-paste-actions { display: flex; flex-direction: column; gap: 6px; justify-content: center; }
+.recal-controls { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 12px; }
+.recal-block-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.recal-block-head h3 { margin: 0; }
+.recal-table-wrap { max-height: 220px; overflow: auto; border: 1px solid var(--stroke); border-radius: 6px; margin-top: 6px; }
+.recal-table-wrap table { min-width: 600px; }
+.recal-anchor-table input[type=number] { width: 88px; margin-top: 0; padding: 4px 6px; text-align: right; font-variant-numeric: tabular-nums; }
+.recal-anchor-table td, .recal-anchor-table th { padding: 5px 8px; }
+.delta-badge { color: var(--teal); font-variant-numeric: tabular-nums; }
+.delta-badge.warn { color: var(--amber); }
+.import-recal-check { margin-top: 10px; }
 textarea { resize: vertical; min-height: 120px; font-family: Consolas, "Microsoft YaHei UI", monospace; }
 .import-actions { margin-top: 12px; }
 .file-label input { width: 1px; height: 1px; position: absolute; clip-path: inset(50%); }
@@ -117,7 +134,7 @@ textarea { resize: vertical; min-height: 120px; font-family: Consolas, "Microsof
   .metrics small { width: 100%; }
 }
 @media (max-width: 780px) {
-  .dashboard, .profiles { grid-template-columns: 1fr; }
+  .dashboard, .profiles, .recal-controls, .recal-paste-row { grid-template-columns: 1fr; }
 }
 @media (max-width: 520px) {
   .shell { padding: 14px 10px 28px; }
