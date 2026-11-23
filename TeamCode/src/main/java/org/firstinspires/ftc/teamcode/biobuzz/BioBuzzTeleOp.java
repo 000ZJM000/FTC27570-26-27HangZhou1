@@ -27,6 +27,7 @@ public class BioBuzzTeleOp extends LinearOpMode {
 
     @Override public void runOpMode() throws InterruptedException {
         CalibrationStore store = new CalibrationStore(hardwareMap.appContext);
+        TurnLinearity turnLinearity = TurnLinearity.load(store);
         boolean calibratedMode = usesShotCalibration();
         CalibratedShotMap shotMap = calibratedMode ? new CalibratedShotMap(store) : null;
         BatteryVoltage battery = new BatteryVoltage(hardwareMap);
@@ -82,6 +83,7 @@ public class BioBuzzTeleOp extends LinearOpMode {
                         telemetry.addLine("<font color='#ffcc33'>飞轮仍在使用旧占空比曲线，建议重跑 04 校准 12V 前馈</font>");
                     }
                 }
+                telemetry.addData("转向摇杆线性映射", turnLinearity.summary());
                 telemetry.update();
                 sleep(25);
             }
@@ -133,8 +135,8 @@ public class BioBuzzTeleOp extends LinearOpMode {
                 }
                 double f = Maths.deadband(-gamepad1.left_stick_y);
                 double l = Maths.deadband(-gamepad1.left_stick_x);
-                double turn = Maths.deadband(-gamepad1.right_stick_x);
-                boolean driveIdle = f == 0 && l == 0 && turn == 0;
+                double rawTurn = Maths.deadband(-gamepad1.right_stick_x);
+                boolean driveIdle = f == 0 && l == 0 && rawTurn == 0;
                 pose.update();
                 if (isStopRequested()) break;
                 // Re-anchor only when the operator has returned the robot to the entered pose.
@@ -187,6 +189,7 @@ public class BioBuzzTeleOp extends LinearOpMode {
                 lastYawReset = yawReset;
                 double driveLimit = battery.low() ? BatteryVoltage.LOW_DRIVE_LIMIT : 1;
                 if (calibratedMode && triggerHeld) driveLimit = Math.min(driveLimit, RUN_SHOT_POWER);
+                double turn = turnLinearity.mapDuty(rawTurn, f, l, battery, driveLimit);
                 double effective = 0;
                 if (drive != null) effective = field ? drive.field(f, l, turn, pose.heading - driverYawZero, driveLimit)
                         : drive.robot(f, l, turn, driveLimit);
@@ -310,7 +313,13 @@ public class BioBuzzTeleOp extends LinearOpMode {
                     }
                     telemetry.addData("底盘", field ? "无头" : "车头模式");
                     if (driveLimit < 1) telemetry.addData("底盘输出上限", "%.0f%%", 100 * driveLimit);
-                    if (turn != 0) telemetry.addData("底盘转向输出", "%+.2f", effective);
+                    if (rawTurn != 0 || gamepad1.back) {
+                        telemetry.addData("转向 摇杆 / 映射输出 / 角速度", "%+.2f → %+.2f / %+.0f°/s%s",
+                                rawTurn, effective, Math.toDegrees(pose.yawRate),
+                                turnLinearity.calibrated()
+                                        ? String.format("（期望 %+.0f°/s）", Math.toDegrees(turnLinearity.expectedRate(rawTurn)))
+                                        : "");
+                    }
                     telemetry.addData("右 / 前 / 车头", "%.2f / %.2f 格 / %+.1f°", -pose.left / RobotConfig.TILE_MM,
                             pose.forward / RobotConfig.TILE_MM, Math.toDegrees(pose.heading));
                     telemetry.addData("Pinpoint", pose.status);

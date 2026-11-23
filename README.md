@@ -5,7 +5,8 @@ FTC 27570 在 2026–2027 BIOBUZZ 赛季使用的机器人控制程序。项目�
 - **比赛主控** · Driver Station → TeleOp → **BIOBUZZ 360 云台 + 无头**
 - **标定地图跑打** · Driver Station → TeleOp → **BIOBUZZ → Biobuzz角落出发**
 - **硬件自测** · Driver Station → TeleOp → **BIOBUZZ 自测**，首次运行 **02 云台全套 → 04 飞轮校准**
-- **射击标定与查看** · 完成硬件自测后运行 **06 半场射击校准**，通过 **07 校准数据查看** 浏览记录
+- **射击标定与查看** · 完成硬件自测后运行 **06 半场射击校准·数据**，START 后按 **L3** 切换数据查看
+- **转向标定** · Driver Station → TeleOp → **BIOBUZZ 自测 → 07 转向摇杆线性校准**
 - **定位诊断** · Driver Station → TeleOp → **BIOBUZZ 诊断 → goBILDA Pinpoint Example**
 - **离线拟合** · 下载完整仓库后，在浏览器打开 [射击拟合工作台/index.html](射击拟合工作台/index.html)
 - **详细接线、坐标和自测流程** · [BIOBUZZ 上车指南](BIOBUZZ-上车指南.md)
@@ -56,6 +57,7 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | 飞轮校准 | **04 飞轮校准 12V前馈·三球回速** | 转向与每转计数、七档空载电压前馈拟合，可选三球实弹回速 |
 | 单项复测 | **03 云台专项 12V联动补偿** | 使用现有行程与动力学，单独重测底盘联动 |
 | 快检或重调 | **05 云台专项 12V PID·回转** | 使用现有行程与摩擦，单独运行 30 秒快检或完整 PID 拟合 |
+| 转向手感 | **07 转向摇杆线性校准** | 自动测左右起转死区、七档旋转速度，生成转向映射并复测 |
 
 首次校准运行 **02 → 04**。02 可在已有有效标定基础上，分阶段选择重测或沿用动力学、摩擦表、底盘联动和云台 PID。执行联动与回转前按提示让轮子落地、腾出旋转空间。04 按提示识别飞轮方向、测每转计数并扫描七档 3–12 V 前馈，之后可进行三球回速测试。
 
@@ -69,21 +71,29 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 
 校准屏显示实测电池电压与 12.00 V 标称值。主程序 INIT 会显示云台和飞轮实际加载的 P/I/D 与来源。运行中按住 **Back** 可以查看实际输出、电压与转速偏差。
 
+## 转向摇杆线性校准
+
+运行 **BIOBUZZ 自测 → 07 转向摇杆线性校准**。轮子落地，留出底盘旋转空间，初始化 Pinpoint 时保持静止。START 后按提示选择：首次按 **A** 开始测量，已有有效函数时按 **A** 重测、按 **B** 直接复测现有函数。
+
+程序先测左右起转死区，再各扫七档输出，按左右方向分别拟合三次逆映射。有效拟合会自动保存到 `calibration.json` 的 `drive_turn_linearity_v1`，随后以 20%、40%、60%、80%、100% 杆量双向复测，显示校准函数、RMSE、R² 与峰值角速度。扫描中止或拟合失败时保留原参数。
+
+复测后按 **A** 可进入最长 45 秒的实时试驾，左摇杆平移、右摇杆横向转向，**X** 结束、**B** 停止当前动作。普通主控与角落模式在下一次 INIT 加载该函数，并显示加载状态。转向按 12 V 换算输出，平移时减少起转补偿，未保存有效函数时沿用摇杆直通。平移叠加、功率上限和地面负载会影响实际角速度，以复测结果为准。
+
 ## Hub 标定文件与模型交换
 
 默认数据目录为 `/sdcard/FIRST/biobuzz/`，文件用途如下。
 
 | 文件 | 来源与用途 |
 | --- | --- |
-| `calibration.json` | 保存硬件标定、PID、射击测点和过期标记，可用于换 Hub 时备份与恢复 |
-| `shot_records.json` | 07 导出的实测记录，包含坐标、射向、RPM、机械尺寸、电池电压和 ST 位置，供工作台导入 |
+| `calibration.json` | 保存硬件标定、PID、转向映射、射击测点和过期标记，可用于换 Hub 时备份与恢复 |
+| `shot_records.json` | 06 自动导出的实测记录，包含坐标、射向、RPM、机械尺寸、电池电压和 ST 位置，数据查看模式按 Y 可重导 |
 | `shot_model.json` | 工作台导出的参数模型，复制回同目录后，在下一次 INIT 角落模式时加载 |
 
 `CalibrationStore` 从旧版应用标定迁移到 JSON，写入使用临时文件和原子替换。共享目录不可写时使用应用内部的 `biobuzz` 目录。仓库中的 [calibration.json](TeamCode/src/main/assets/biobuzz/calibration.json) 提供空结构模板，实车数值由运行中的校准程序保存。
 
 ## 射击数据标定与查看
 
-完成 02 的云台行程与正前方向、04 的飞轮 RPM 标定后，运行 **06 半场射击校准**。INIT 时用方向键左 / 右选择半场，将云台轻摆到最右端，再按 START。每个半场有 **3 列 × 6 行，共 18 个格心**，坐标沿用场地左下角为原点、右和前为正、每格 609.6 mm 的约定。
+完成 02 的云台行程与正前方向、04 的飞轮 RPM 标定后，运行 **06 半场射击校准·数据**。INIT 时用方向键左 / 右选择半场，将云台轻摆到最右端，再按 START。每个半场有 **3 列 × 6 行，共 18 个格心**，坐标沿用场地左下角为原点、右和前为正、每格 609.6 mm 的约定。
 
 | 06 手柄 1 | 操作 |
 | --- | --- |
@@ -91,7 +101,7 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | LB / RB | 目标转速每按一次减 / 加 25 RPM |
 | X | 云台刹车或松开，以便手摆方向 |
 | R3 | 按当前模型预瞄选中点，B 取消 |
-| START + Y | 清空两个半场的旧版 v1 精测点 |
+| L3 | 空闲时切换试射与数据查看 |
 | RT | 单次试射，云台停稳、飞轮到速后供弹 0.65 秒 |
 | A | 确认命中后保存本点最近完成的试射 |
 | Y | 标记本点不可达，或解除标记 |
@@ -100,7 +110,17 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 
 每次装一颗球，车头朝场地正前方，格心模式将麦轮中心摆在格心。四角精测按屏幕提示，将车身指定角对准地垫同名角，两条车身边沿着接缝，整车放在该地垫内。程序根据车身尺寸换算实际测点坐标，保存供弹开始时的射向、目标 RPM、电池电压和 ST 舵机位置。有新版四角记录的格子会自动停用旧精测。
 
-运行 **07 校准数据查看**，点 INIT 即可浏览记录。方向键左 / 右翻页，**A** 切换已记录和全部点位，**X** 切换密集列表与坐标详情。START 后按 **Y** 导出 `shot_records.json`，**START + Y** 清空旧 v1 精测。
+在 **06 半场射击校准·数据** 中，START 后空闲时按 **L3** 进入数据查看，浏览两个半场的格心、四角与旧精测。方向键左 / 右翻页，**A** 切换已记录和全部点位，**X** 切换密集列表与坐标详情，**Y** 重新导出 `shot_records.json`，**L3** 或 **B** 返回试射。密集模式每行最多 3 个点、每页最多 10 行，详情每页 3 个点。进入 START、保存测点和变更不可达标记时也会自动导出记录。
+
+文件管理快捷键在 INIT 或 START 后的空闲状态可用。
+
+| 06 组合键 | 作用 |
+| --- | --- |
+| START + X | 删除 `shot_records.json` 和 `shot_model.json`，保留 `calibration.json` 内的测点，记录可再次导出 |
+| START + Y | 清空两个半场的旧版 v1 精测点并更新记录 JSON |
+| START + Back，3 秒内松开再按一次 | 清空全部 06 测点及射击元数据，并删除 records / model 两个 JSON |
+
+清空全部 06 数据会保留云台、飞轮、转向等硬件标定。删除模型后，下次 INIT 角落模式将尝试从保留的 06 测点拟合。
 
 记录格式为 `行列点:角度×100/RPM`。例如 `110:-4675/3100` 表示第 1 行第 1 列格心、射向 −46.75°、目标 3100 RPM。点号 **0** 为格心，**1–4** 依次为左后、右后、右前、左前，**a–h** 为旧精测。`@右,前` 给出原记录的坐标，单位为格。`?` 表示没有数值，`!` 表示不可达，`~` 表示该位置已停用。
 
@@ -119,7 +139,7 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 调整发射器固定俯仰角后，可重测少量锚点，用新旧偏差估算其余格心与精测记录。常用锚点是覆盖近远距离的 6 个格心 `110`–`610`。
 
 1. 加载已有的完整测点或方案，在 **新角度少点校准** 中点击 **将当前表设为基准**。
-2. 粘贴新锚点的 07 文字或读取 JSON/TXT，点击 **填入锚点表**，核对自动勾选的点、射向和 RPM。也可用 **提取格心锚点** 快速选择格心。
+2. 粘贴新锚点的 06 数据查看文字或读取 JSON/TXT，点击 **填入锚点表**，核对自动勾选的点、射向和 RPM。也可用 **提取格心锚点** 快速选择格心。
 3. 选择迁移算法、射向处理和 RPM 径向阶数，查看各点的旧值、新值、迁移量及计算方式。默认使用格心锚定与径向梯度，详细策略见 [工作台 README](射击拟合工作台/README.md)。
 4. 点击 **应用校准到全部精测点** 更新主表，再保存 `shot_model.json` 回传 Hub。**还原到 24 点基准** 可将主表恢复为当前保存的基准，实际迁移点数显示在预览统计中。
 
@@ -138,7 +158,7 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | 手柄 1 | 功能 |
 | --- | --- |
 | 左摇杆 | 麦轮平移。航向可用时按场地坐标无头驾驶，航向丢失时切换为车头坐标 |
-| 右摇杆横向 | 旋转底盘 |
+| 右摇杆横向 | 旋转底盘，加载有效 07 校准后使用左右转向映射与电压补偿 |
 | 方向键左 / 右 | 当前飞轮目标每按一次减 / 加 100 RPM |
 | 方向键上 / 下 | 云台零位每按一次加 / 减 0.5° |
 | R3（未按 Back）/ L3 | 切换转速锁 / 清零云台微调 |
@@ -192,7 +212,8 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | [Flywheel.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/Flywheel.java) | 飞轮测速、12 V 前馈、轻 PI、Bang-Bang 补电和挡弹控制 |
 | [Turret.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/Turret.java) | 云台角度、回转控制与瞄准状态 |
 | [ShotVectorField.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/ShotVectorField.java) / [CalibratedShotMap.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/CalibratedShotMap.java) | 格心、四角与旧精测存储，机器人运行时射击地图 |
-| [ShotFieldCalibration.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration/ShotFieldCalibration.java) / [ShotFieldDataView.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration/ShotFieldDataView.java) | 06 打点标定和 07 数据查看 |
+| [ShotFieldCalibration.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration/ShotFieldCalibration.java) | 06 打点标定、数据查看与射击文件管理 |
+| [TurnCalibration.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration/TurnCalibration.java) / [TurnLinearity.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/TurnLinearity.java) | 07 自动转向标定、分方向拟合与主控转向映射 |
 | [TurretPidTuning.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration/TurretPidTuning.java) | 云台 10–16 个有效轮的 PID 搜索、留出复测与回转验收 |
 | [calibration/](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration) | 自测 OpMode、模型拟合与 PID 参数搜索 |
 | [射击拟合工作台/](射击拟合工作台) | 离线数据导入、拟合、可视化和 JSON / CSV 导出 |

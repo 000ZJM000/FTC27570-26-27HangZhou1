@@ -36,6 +36,7 @@ public final class CalibrationStore {
     public static final String FLYWHEEL_FULL_POWER_MODEL = "flywheel_model_full_power_v1";
     public static final String FLYWHEEL_PID = "flywheel_pid";
     public static final String FLYWHEEL_VOLTAGE_PID = "flywheel_12v_hybrid_pid_v1";
+    public static final String TURN_LINEARITY = "drive_turn_linearity_v1";
 
     private static final String CALIBRATION = "calibration.json";
     private static final Object LOCK = new Object();
@@ -227,6 +228,53 @@ public final class CalibrationStore {
                 if (!writeJson(CALIBRATION, changed)) return false;
                 data = changed;
                 return true;
+            } catch (JSONException malformed) {
+                return false;
+            }
+        }
+    }
+
+    public boolean hasJsonFile(String name) {
+        return new File(directory, name).isFile();
+    }
+
+    public boolean deleteJsonFile(String name) {
+        synchronized (LOCK) {
+            File target = new File(directory, name);
+            return !target.exists() || target.delete();
+        }
+    }
+
+    public boolean deleteShotFiles() {
+        synchronized (LOCK) {
+            boolean recordsDeleted = deleteJsonFile(ShotRecords.FILE);
+            boolean modelDeleted = deleteJsonFile(CalibratedShotMap.FILE);
+            return recordsDeleted && modelDeleted;
+        }
+    }
+
+    public boolean clearAllShotData() {
+        synchronized (LOCK) {
+            try {
+                JSONObject latest = readCalibration();
+                JSONObject changed = new JSONObject((latest != null ? latest : data).toString());
+                JSONObject records = changed.getJSONObject("values");
+                records.remove("shot_vector_field_left_v1");
+                records.remove("shot_vector_field_right_v1");
+                records.remove("shot_vector_refinements_left_v1");
+                records.remove("shot_vector_refinements_right_v1");
+                records.remove("shot_vector_refinements_left_v2");
+                records.remove("shot_vector_refinements_right_v2");
+                Iterator<String> keys = records.keys();
+                Set<String> metaKeys = new LinkedHashSet<>();
+                while (keys.hasNext()) {
+                    String key = keys.next();
+                    if (key.startsWith("shot_meta_")) metaKeys.add(key);
+                }
+                for (String key : metaKeys) records.remove(key);
+                if (!writeJson(CALIBRATION, changed)) return false;
+                data = changed;
+                return deleteShotFiles();
             } catch (JSONException malformed) {
                 return false;
             }

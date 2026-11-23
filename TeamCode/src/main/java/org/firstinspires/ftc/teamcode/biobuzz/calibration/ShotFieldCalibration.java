@@ -4,25 +4,34 @@ import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.Gamepad;
 import com.qualcomm.robotcore.hardware.Servo;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import org.firstinspires.ftc.robotcore.external.Telemetry;
 import org.firstinspires.ftc.teamcode.biobuzz.BatteryVoltage;
 import org.firstinspires.ftc.teamcode.biobuzz.CalibratedShotMap;
 import org.firstinspires.ftc.teamcode.biobuzz.CalibrationStore;
 import org.firstinspires.ftc.teamcode.biobuzz.ControlLoop;
+import org.firstinspires.ftc.teamcode.biobuzz.FieldTargets;
 import org.firstinspires.ftc.teamcode.biobuzz.Flywheel;
 import org.firstinspires.ftc.teamcode.biobuzz.Intake;
 import org.firstinspires.ftc.teamcode.biobuzz.Maths;
 import org.firstinspires.ftc.teamcode.biobuzz.RobotConfig;
 import org.firstinspires.ftc.teamcode.biobuzz.ShotRecords;
 import org.firstinspires.ftc.teamcode.biobuzz.ShotVectorField;
+import org.firstinspires.ftc.teamcode.biobuzz.ShotVectorField.PointData;
 import org.firstinspires.ftc.teamcode.biobuzz.Turret;
 
-@TeleOp(name = "06 半场射击校准", group = "BIOBUZZ 自测")
+@TeleOp(name = "06 半场射击校准·数据", group = "BIOBUZZ 自测")
 public final class ShotFieldCalibration extends LinearOpMode {
     private static final double TRIGGER_THRESHOLD = 0.10;
     private static final double SPIN_UP_TIMEOUT = 5.0;
     private static final double FEED_SECONDS = 0.65;
     private static final int RPM_STEP = 25;
+    private static final int COMPACT_ROWS_PER_PAGE = 10;
+    private static final int COMPACT_LINE_WIDTH = 44;
+    private static final int POINTS_PER_ROW = 3;
+    private static final int DETAIL_POINTS_PER_PAGE = 3;
     private enum TrialState { IDLE, SPINNING_UP, FEEDING }
 
     private Turret turret;
@@ -45,6 +54,15 @@ public final class ShotFieldCalibration extends LinearOpMode {
     private ShotVectorField.Vector trial, pending;
     private String status = "选格、摆位、调速后扣 RT";
 
+    private boolean dataViewMode, showAllPoints, detailView;
+    private int dataPage;
+    private double confirmClearAllUntil = Double.NEGATIVE_INFINITY;
+    private String modelStatus = "";
+    private final List<PointData> allPoints = new ArrayList<>();
+    private final List<PointData> recordedPoints = new ArrayList<>();
+    private final List<String> allCompactRows = new ArrayList<>();
+    private final List<String> recordedCompactRows = new ArrayList<>();
+
     @Override public void runOpMode() {
         store = new CalibrationStore(hardwareMap.appContext);
         battery = new BatteryVoltage(hardwareMap);
@@ -56,13 +74,28 @@ public final class ShotFieldCalibration extends LinearOpMode {
             if (pitch != null) pitch.setPosition(RobotConfig.ST_HOME);
 
             turret.teachingMode(true);
+            refreshDataView();
             telemetry.setMsTransmissionInterval(150);
+
+            Gamepad initPrevious = new Gamepad();
+            Gamepad initCurrent = new Gamepad();
+            initPrevious.copy(gamepad1);
             while (opModeInInit()) {
-                if (gamepad1.dpad_left) rightHalf = false;
-                if (gamepad1.dpad_right) rightHalf = true;
+                initCurrent.copy(gamepad1);
+                if (!initCurrent.start) {
+                    if (initCurrent.dpad_left) rightHalf = false;
+                    if (initCurrent.dpad_right) rightHalf = true;
+                }
+                handleFileShortcuts(initCurrent, initPrevious, Maths.time());
+                Gamepad swap = initPrevious;
+                initPrevious = initCurrent;
+                initCurrent = swap;
+
                 telemetry.addLine("方向键左 / 右选半场。将云台轻摆到最右端后按 START。");
                 telemetry.addData("3 × 6", rightHalf ? "右半场（右坐标 3–6 格）" : "左半场（右坐标 0–3 格）");
-                telemetry.addLine("车头朝场地正前。格心模式摆格心，四角精测按地垫接缝摆车。");
+                telemetry.addData("射界文件", jsonFilesStatus());
+                telemetry.addLine("START+X 一键删除 records/model JSON | START后 L3 切数据查看");
+                telemetry.addLine(status);
                 if (!turret.calibrated()) telemetry.addLine("试射前先完成 02 云台行程和正前方向标定。");
                 if (!flywheel.rpmCalibrated()) telemetry.addLine("试射前先完成 04 飞轮 RPM 标定。");
                 telemetry.update();
@@ -73,6 +106,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
             if (turret.calibrated()) turret.homeAtRight();
             field = new ShotVectorField(store, rightHalf);
             ShotRecords.export(store);
+            refreshDataView();
             maxRpm = flywheel.maxTargetRpm();
             targetRpm = Math.min(RobotConfig.FLYWHEEL_TARGET_RPM, maxRpm);
             runCalibration(loop);
@@ -114,25 +148,39 @@ public final class ShotFieldCalibration extends LinearOpMode {
     }
 
     private void handleControls(Gamepad current, Gamepad previous, double now) {
-        if (current.b) {
+        if (!current.start && current.b && !previous.b) {
+            if (state != TrialState.IDLE) {
+                endTrial("试射已取消");
+                return;
+            }
+            if (Double.isFinite(previewAngle)) {
+                endPreview("预瞄已取消");
+                return;
+            }
+            if (dataViewMode) {
+                setDataViewMode(false);
+                status = "已返回试射界面";
+                return;
+            }
+        } else if (!current.start && current.b) {
             if (state != TrialState.IDLE) endTrial("试射已取消");
             if (Double.isFinite(previewAngle)) endPreview("预瞄已取消");
             return;
         }
-        if (state != TrialState.IDLE) return;
-        if (Double.isFinite(previewAngle)) return;
-        if (current.start && current.y && !(previous.start && previous.y)) {
-            if (store.clearLegacyShotPoints()) {
-                ShotVectorField.Refinement selected = selectedRefinement();
-                field = new ShotVectorField(store, rightHalf);
-                if (selected != null) {
-                    refinements = field.refinements();
-                    pending = null;
-                }
-                status = ShotRecords.export(store) ? "两半场旧 v1 精测已清空" : "已清空，JSON 导出失败";
-            } else status = "旧精测清空失败";
+        if (state != TrialState.IDLE || Double.isFinite(previewAngle)) return;
+        if (handleFileShortcuts(current, previous, now)) return;
+
+        if (current.left_stick_button && !previous.left_stick_button) {
+            setDataViewMode(!dataViewMode);
+            status = dataViewMode ? "已进入校准数据查看" : "已返回试射界面";
             return;
         }
+
+        if (dataViewMode) {
+            handleDataViewControls(current, previous);
+            return;
+        }
+        if (current.start) return;
 
         if (current.back && !previous.back) {
             toggleRefinements();
@@ -170,6 +218,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
                 pending = null;
                 status = unreachable ? "已标为不可达" : "已解除不可达标记";
                 if (!ShotRecords.export(store)) status += "，JSON 导出失败";
+                refreshDataView();
             } else status = "保存不可达状态失败，请重试";
             return;
         }
@@ -179,6 +228,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
                     : field.save(point, pending, trialVoltage, trialPitch)) {
                 pending = null;
                 status = ShotRecords.export(store) ? "已保存当前点向量及 JSON" : "向量已保存，JSON 导出失败";
+                refreshDataView();
             } else status = "保存向量失败，请重试";
             return;
         }
@@ -199,6 +249,106 @@ public final class ShotFieldCalibration extends LinearOpMode {
         }
     }
 
+    private boolean handleFileShortcuts(Gamepad current, Gamepad previous, double now) {
+        if (current.start && current.x && !(previous.start && previous.x)) {
+            boolean deleted = store.deleteShotFiles();
+            refreshDataView();
+            status = deleted ? "已一键删除 shot_records.json 和 shot_model.json" : "删除 JSON 文件失败";
+            return true;
+        }
+        if (current.start && current.y && !(previous.start && previous.y)) {
+            if (store.clearLegacyShotPoints()) {
+                if (field != null) {
+                    ShotVectorField.Refinement selected = selectedRefinement();
+                    field = new ShotVectorField(store, rightHalf);
+                    if (selected != null) {
+                        refinements = field.refinements();
+                        pending = null;
+                    }
+                }
+                status = ShotRecords.export(store) ? "两半场旧 v1 精测已清空并更新 JSON" : "已清空旧 v1，JSON 导出失败";
+                refreshDataView();
+            } else status = "旧精测清空失败";
+            return true;
+        }
+        if (current.start && current.back && !(previous.start && previous.back)) {
+            if (now <= confirmClearAllUntil) {
+                confirmClearAllUntil = Double.NEGATIVE_INFINITY;
+                if (store.clearAllShotData()) {
+                    if (field != null) field = new ShotVectorField(store, rightHalf);
+                    refinements = null;
+                    pending = null;
+                    dataPage = 0;
+                    refreshDataView();
+                    status = "已清空全部 06 测点并删除 shot_records / shot_model";
+                } else status = "清空全部 06 数据失败";
+            } else {
+                confirmClearAllUntil = now + 3.0;
+                status = "3秒内再按 START+Back 确认清空全部06测点与JSON";
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private void handleDataViewControls(Gamepad current, Gamepad previous) {
+        if (current.start) return;
+        if (current.a && !previous.a) {
+            showAllPoints = !showAllPoints;
+            dataPage = 0;
+            return;
+        }
+        if (current.x && !previous.x) {
+            detailView = !detailView;
+            dataPage = 0;
+            telemetry.setDisplayFormat(detailView ? Telemetry.DisplayFormat.CLASSIC : Telemetry.DisplayFormat.MONOSPACE);
+            return;
+        }
+        if (current.y && !previous.y) {
+            status = ShotRecords.export(store) ? ShotRecords.FILE + " 已重新导出" : "JSON 导出失败";
+            refreshDataView();
+            return;
+        }
+        List<PointData> visible = showAllPoints ? allPoints : recordedPoints;
+        List<String> rows = showAllPoints ? allCompactRows : recordedCompactRows;
+        int perPage = detailView ? DETAIL_POINTS_PER_PAGE : COMPACT_ROWS_PER_PAGE;
+        int count = detailView ? visible.size() : rows.size();
+        int pages = (count + perPage - 1) / perPage;
+        boolean left = current.dpad_left && !previous.dpad_left;
+        boolean right = current.dpad_right && !previous.dpad_right;
+        if (left != right && pages > 0) {
+            dataPage = Math.max(0, Math.min(dataPage + (right ? 1 : -1), pages - 1));
+        }
+    }
+
+    private void setDataViewMode(boolean enabled) {
+        dataViewMode = enabled;
+        dataPage = 0;
+        if (enabled) refreshDataView();
+        telemetry.setDisplayFormat(enabled && !detailView
+                ? Telemetry.DisplayFormat.MONOSPACE : Telemetry.DisplayFormat.CLASSIC);
+    }
+
+    private void refreshDataView() {
+        allPoints.clear();
+        allPoints.addAll(new ShotVectorField(store, false).pointsForReview());
+        allPoints.addAll(new ShotVectorField(store, true).pointsForReview());
+        recordedPoints.clear();
+        for (PointData point : allPoints) if (point.unreachable || point.shot != null) recordedPoints.add(point);
+        allCompactRows.clear();
+        allCompactRows.addAll(compactRows(allPoints));
+        recordedCompactRows.clear();
+        recordedCompactRows.addAll(compactRows(recordedPoints));
+        modelStatus = new CalibratedShotMap(store).description();
+    }
+
+    private String jsonFilesStatus() {
+        return String.format(Locale.ROOT, "records:%s | model:%s (%s)",
+                store.hasJsonFile(ShotRecords.FILE) ? "有" : "无",
+                store.hasJsonFile(CalibratedShotMap.FILE) ? "有" : "无",
+                modelStatus);
+    }
+
     private void startPreview(ShotVectorField.Refinement point, double now) {
         if (!turret.calibrated() || !turret.encoderReady() || !turret.motorResponding()) {
             status = "云台反馈未就绪";
@@ -209,8 +359,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
         CalibratedShotMap model = new CalibratedShotMap(store);
         ShotVectorField.Vector guess = model.preview(x, y);
         double bearing = guess != null ? guess.bearing()
-                : org.firstinspires.ftc.teamcode.biobuzz.FieldTargets.fromPose(
-                        y * RobotConfig.TILE_MM, -x * RobotConfig.TILE_MM, 0).bearing;
+                : FieldTargets.fromPose(y * RobotConfig.TILE_MM, -x * RobotConfig.TILE_MM, 0).bearing;
         previewAngle = turret.previewAngle(bearing);
         if (!Double.isFinite(previewAngle)) {
             status = "预瞄目标超出云台安全行程";
@@ -353,6 +502,10 @@ public final class ShotFieldCalibration extends LinearOpMode {
     }
 
     private void showCalibration() {
+        if (dataViewMode) {
+            showDataView();
+            return;
+        }
         ShotVectorField.Refinement point = selectedRefinement();
         if (point == null) {
             telemetry.addData("格心 右 / 前", "%.1f / %.1f 格，车头朝正前",
@@ -372,14 +525,103 @@ public final class ShotFieldCalibration extends LinearOpMode {
         }
         telemetry.addData("试射", state == TrialState.IDLE ? status
                 : state == TrialState.SPINNING_UP ? "等待云台停稳和飞轮到速" : "正在单次供弹");
+        telemetry.addData("射界文件", jsonFilesStatus());
         showVector("待保存", pending);
         showVector("当前点已保存", point == null ? field.at(column, row) : field.at(point));
         if (point == null) showGrid();
-        telemetry.addLine(point == null ? "方向键选格 | Back 四角精测" : "方向键左/右换角 | Back 回格心");
-        telemetry.addLine("LB/RB −/+" + RPM_STEP + " RPM | X 刹车/松开");
+        telemetry.addLine(point == null ? "方向键选格 | Back 四角精测 | L3 查看数据" : "方向键左/右换角 | Back 回格心 | L3 查看数据");
+        telemetry.addLine("LB/RB −/+" + RPM_STEP + " RPM | X 刹车/松开 | R3 预瞄");
         telemetry.addLine("RT 单次试射 | A 保存试射 | Y 不可达/恢复 | B 取消试射");
-        telemetry.addLine("R3 预瞄 | START + Y 清空旧 v1 精测");
+        telemetry.addLine("START+X 删records/model JSON | START+Y 清旧v1 | START+Back 全清");
         telemetry.update();
+    }
+
+    private void showDataView() {
+        List<PointData> visible = showAllPoints ? allPoints : recordedPoints;
+        List<String> rows = showAllPoints ? allCompactRows : recordedCompactRows;
+        int perPage = detailView ? DETAIL_POINTS_PER_PAGE : COMPACT_ROWS_PER_PAGE;
+        int count = detailView ? visible.size() : rows.size();
+        int pages = (count + perPage - 1) / perPage;
+        dataPage = pages == 0 ? 0 : Math.min(dataPage, pages - 1);
+        if (detailView) showDetails(visible, dataPage, pages);
+        else showCompact(rows, visible.size(), dataPage, pages);
+        telemetry.addData("文件", jsonFilesStatus());
+        telemetry.addLine(status);
+        telemetry.addLine("左右翻页 | A 全部/已录 | X 密集/详情 | Y 导出JSON | L3/B 回试射");
+        telemetry.addLine("START+X 删records/model JSON | START+Y 清旧v1 | START+Back 全清");
+        telemetry.update();
+    }
+
+    private void showCompact(List<String> rows, int pointCount, int page, int pages) {
+        telemetry.addLine(String.format(Locale.ROOT, "%s%d点 %d/%d",
+                showAllPoints ? "全部" : "记录", pointCount, pages == 0 ? 0 : page + 1, pages));
+        if (rows.isEmpty()) telemetry.addLine("暂无已保存或标记的点");
+        int start = page * COMPACT_ROWS_PER_PAGE;
+        for (int i = start; i < Math.min(start + COMPACT_ROWS_PER_PAGE, rows.size()); i++) {
+            telemetry.addLine(rows.get(i));
+        }
+    }
+
+    private void showDetails(List<PointData> points, int page, int pages) {
+        telemetry.addData(showAllPoints ? "全部点位" : "已记录点位", "%d 点 · %d/%d 页",
+                points.size(), pages == 0 ? 0 : page + 1, pages);
+        if (points.isEmpty()) {
+            telemetry.addLine("暂无已保存或标记的点");
+        } else {
+            telemetry.addLine("左后角为原点，射向左为正，RPM 为目标转速");
+            int start = page * DETAIL_POINTS_PER_PAGE;
+            for (int i = start; i < Math.min(start + DETAIL_POINTS_PER_PAGE, points.size()); i++) {
+                showPoint(points.get(i));
+            }
+        }
+    }
+
+    private void showPoint(PointData point) {
+        String stateText = point.unreachable ? "不可达" : point.inactive ? "已停用"
+                : point.shot == null ? "未测" : "已保存";
+        telemetry.addLine(String.format(Locale.ROOT, "%d行%d列 %s · %s",
+                point.row, point.column, point.label, stateText));
+        String position = String.format(Locale.ROOT, "右 %.3f / 前 %.3f 格", point.rightTiles, point.forwardTiles);
+        if (point.shot != null) {
+            position += String.format(Locale.ROOT, " · %+.2f° · %.1f RPM",
+                    Math.toDegrees(point.shot.bearing()), point.shot.rpm());
+        }
+        telemetry.addLine(position);
+    }
+
+    private static List<String> compactRows(List<PointData> points) {
+        List<String> rows = new ArrayList<>();
+        StringBuilder row = new StringBuilder();
+        int pointsOnRow = 0;
+        for (PointData point : points) {
+            String entry = compactPoint(point);
+            if (pointsOnRow > 0 && (pointsOnRow == POINTS_PER_ROW
+                    || row.length() + 1 + entry.length() > COMPACT_LINE_WIDTH)) {
+                rows.add(row.toString());
+                row.setLength(0);
+                pointsOnRow = 0;
+            }
+            if (pointsOnRow > 0) row.append(' ');
+            row.append(entry);
+            pointsOnRow++;
+        }
+        if (pointsOnRow > 0) rows.add(row.toString());
+        return rows;
+    }
+
+    private static String compactPoint(PointData point) {
+        String id = String.format(Locale.ROOT, "%d%d%c", point.row, point.column, point.code);
+        if (point.code >= 'a' || point.inactive) {
+            id += String.format(Locale.ROOT, "@%.3f,%.3f", point.rightTiles, point.forwardTiles);
+        }
+        String flags = (point.unreachable ? "!" : "") + (point.inactive ? "~" : "");
+        if (point.shot == null) return id + ":?" + flags;
+
+        long angle = Math.round(Math.toDegrees(point.shot.bearing()) * 100);
+        long rpmTenths = Math.round(point.shot.rpm() * 10);
+        String rpm = rpmTenths % 10 == 0 ? Long.toString(rpmTenths / 10)
+                : String.format(Locale.ROOT, "%.1f", rpmTenths / 10.0);
+        return id + ":" + angle + "/" + rpm + flags;
     }
 
     private void showGrid() {
