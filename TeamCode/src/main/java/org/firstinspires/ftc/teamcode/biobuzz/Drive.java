@@ -50,7 +50,11 @@ public final class Drive {
         apply(1, bl / scale, step, maxPower);
         apply(2, fr / scale, step, maxPower);
         apply(3, br / scale, step, maxPower);
-        return (applied[2] + applied[3] - applied[0] - applied[1]) / 4;
+        return turnFromWheels(applied[0], applied[1], applied[2], applied[3]);
+    }
+
+    static double turnFromWheels(double fl, double bl, double fr, double br) {
+        return (fr + br - fl - bl) / 4;
     }
 
     private void apply(int index, double requested, double step, double limit) {

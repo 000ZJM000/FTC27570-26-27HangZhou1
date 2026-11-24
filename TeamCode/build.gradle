@@ -20,6 +20,36 @@ repositories {
     maven { url = 'https://maven.brott.dev/' }
 }
 
+abstract class PackagePedroRoute extends DefaultTask {
+    @InputFile
+    @PathSensitive(PathSensitivity.NONE)
+    abstract RegularFileProperty getRouteFile()
+
+    @OutputDirectory
+    abstract DirectoryProperty getAssetsDirectory()
+
+    @javax.inject.Inject
+    abstract FileSystemOperations getFileSystemOperations()
+
+    @TaskAction
+    void packageRoute() {
+        def source = routeFile
+        def assets = assetsDirectory
+        fileSystemOperations.sync {
+            from(source) {
+                into('pedro')
+                rename { 'two-group-route.json' }
+            }
+            into(assets)
+        }
+    }
+}
+
+def copyPedroRoute = tasks.register('copyPedroRoute', PackagePedroRoute) {
+    routeFile.set(rootProject.layout.projectDirectory.file('PP/吸两组设三组2T-3.json'))
+    assetsDirectory.set(layout.buildDirectory.dir('generated/pedroRouteAssets'))
+}
+
 android {
     namespace = 'org.firstinspires.ftc.teamcode'
 
@@ -32,8 +62,15 @@ android {
     }
 }
 
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.sources.assets.addGeneratedSourceDirectory(copyPedroRoute) { it.assetsDirectory }
+    }
+}
+
 dependencies {
     implementation project(':FtcRobotController')
+    implementation 'com.pedropathing:revhub:3.0.0'
     implementation('com.acmerobotics.dashboard:dashboard:0.6.0') {
         exclude group: 'org.firstinspires.ftc'
     }

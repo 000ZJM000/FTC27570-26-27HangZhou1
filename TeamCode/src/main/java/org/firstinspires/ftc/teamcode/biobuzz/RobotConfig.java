@@ -22,6 +22,7 @@ public final class RobotConfig {
     public static final Direction FLYWHEEL_ENCODER_DIRECTION = Direction.REVERSE;
     public static final String INTAKE_LEFT_SERVO = "SL", INTAKE_RIGHT_SERVO = "SR";
     public static final String BLOCKER_SERVO = "SB", PITCH_SERVO = "ST";
+    public static final String TASK_RIGHT_SERVO = "FR", TASK_LEFT_SERVO = "FL";
     // Expansion Hub encoder port 0 shares its configuration name with the left front drive motor.
     public static final String TURRET_ENCODER = "m-1";
     public static final String PINPOINT = "pinpoint";
@@ -82,6 +83,8 @@ public final class RobotConfig {
     public static final double SL_UP = 0.825, SR_UP = 0.16;
     public static final double SB_IDLE = 0.25, SB_FIRE = 0.60;
     public static final double ST_HOME = 0.47, ST_HIGH = 0.05;
+    public static final double FR_HOME = 0.94, FR_OTHER = 0.0;
+    public static final double FL_HOME = 0.06, FL_OTHER = 1.0;
 
     static int configurePinpoint(GoBildaPinpointDriver device) {
         int version = device.getDeviceVersion();

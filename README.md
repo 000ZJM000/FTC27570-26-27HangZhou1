@@ -4,6 +4,7 @@ FTC 27570 在 2026–2027 BIOBUZZ 赛季使用的机器人控制程序。项目�
 
 - **比赛主控** · Driver Station → TeleOp → **BIOBUZZ 360 云台 + 无头**
 - **标定地图跑打** · Driver Station → TeleOp → **BIOBUZZ → Biobuzz角落出发**
+- **自动路线** · Driver Station → Autonomous → **BIOBUZZ Pedro 吸两组设三组2T**，执行 8 段路径与机构动作
 - **硬件自测** · Driver Station → TeleOp → **BIOBUZZ 自测**，首次运行 **02 云台全套 → 04 飞轮校准**
 - **射击标定与查看** · 完成硬件自测后运行 **06 半场射击校准·数据**，START 后按 **L3** 切换数据查看
 - **转向标定** · Driver Station → TeleOp → **BIOBUZZ 自测 → 07 转向摇杆线性校准**
@@ -26,7 +27,7 @@ FTC 27570 在 2026–2027 BIOBUZZ 赛季使用的机器人控制程序。项目�
 
 APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 
-`TeamCode/build.gradle` 已配置 WAV、MP3、OGG 音频资源无压缩打包，并集成 FTC Dashboard 0.6.0 依赖。
+`TeamCode/build.gradle` 已配置 WAV、MP3、OGG 音频资源无压缩打包，并集成 FTC Dashboard 0.6.0 与 PedroPathing `com.pedropathing:revhub:3.0.0`。构建时自动将指定 PP 路线打包为 assets，首次同步需能访问依赖仓库。
 
 ## Robot Configuration
 
@@ -42,10 +43,11 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | 左右飞轮 | `m-7`、`m-8` | Expansion Hub 电机 2、3，转速反馈接编码器 3 |
 | 吸取舵机 | `SL`、`SR` | Expansion Hub 舵机 0、Control Hub 舵机 5 |
 | 挡弹与俯仰舵机 | `SB`、`ST` | Control Hub 舵机 0、Expansion Hub 舵机 1 |
+| 任务舵机（成对使用） | `FR`、`FL` | 按实车接线设置 Hub 与端口，代码未固定端口 |
 | goBILDA Pinpoint | `pinpoint` | Expansion Hub 2 I²C Bus 1，接两个里程轮 |
 | KIRIN V3 尾灯（可选） | `LED` | 接线所用 I²C 总线，设备类型选 **STM32 Smart LED Module V3** |
 
-飞轮方向以 04 保存的结果为准。Pinpoint 使用 FTC SDK 的 goBILDA 4-Bar 里程轮预设，机械尺寸与安装方向集中在 `RobotConfig.java`。
+飞轮方向以 04 保存的结果为准。Pinpoint 使用 FTC SDK 的 goBILDA 4-Bar 里程轮预设，机械尺寸与安装方向集中在 `RobotConfig.java`。FR/FL 初始化和收回位置为 **0.94 / 0.06**，放下为 **0.00 / 1.00**，需两只均配置才执行切换。
 
 ## 第一次上车
 
@@ -145,13 +147,37 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 
 在普通导入窗口勾选 **作为新角度少点锚点**，会按当前迁移设置直接应用导入数据。保存的方案会同时包含 `baselinePoints`，便于再次导入后继续使用原基准。迁移后的估算点可通过 06 补测试射验证。
 
+## Pedro 自动路线
+
+Driver Station → Autonomous → **BIOBUZZ Pedro 吸两组设三组2T**。使用 PedroPathing 3.0.0 的 Follower、Foresight 和麦轮驱动，定位由现有 Pinpoint 提供，自动与角落主控共用射界查询和供弹判定。
+
+当前打包路线为 [PP/吸两组设三组2T-3.json](PP/吸两组设三组2T-3.json)，共 **8 段**。Gradle 的 `copyPedroRoute` 将它生成为 APK 内的 `pedro/two-group-route.json`。覆盖源文件后重新构建并安装 APK，INIT 时加载更新。其他两份 PP 文件为 7 段存档，现有机构流程要求 8 段。格式与更新方式见 [PP/README.md](PP/README.md)。
+
+1. 按 INIT 显示的 PP 起点 X、Y 和车头角摆车，单位为英寸。起始航向取第 1 段的 Heading，场地图上 0° 朝右、90° 朝上、180° 朝左、270° 朝下。
+2. 保持底盘静止，让自动初始化 Pinpoint，将云台轻摆到最右端。INIT 会抬起 SL/SR、关闭 SB、设置 ST，并将 FR/FL 置于 `0.94 / 0.06`。
+3. 按 START 采云台零位并执行路线，屏幕显示路径、定位、射界来源和射击状态。
+
+| 路径阶段 | 机构动作 |
+| --- | --- |
+| 第 1、3 段后等待 | 原地自瞄，按供弹判定尝试连续射击 |
+| 第 2 段及其段后等待 | 放下 SL/SR 吸取，等待结束后停止并抬起 |
+| 第 4 段到位 | 放下 FR/FL，至少等待 180 ms |
+| 第 5–7 段 | 持续吸取，第 7 段后抬 SL/SR，再原地自瞄射击 |
+| 第 8 段 | 停止飞轮与云台输出，行驶过半收回 FR/FL |
+
+每轮射击累计实际供弹 **2 秒** 后收闸，并至少保留 PP 原定等待。等待上限为原定等待与 2 秒中的较大值再加 2 秒。射界不可用时保朝向并用默认转速，供弹仍经过机构与禁射区判定。
+
+未到位且平移低于 **0.5 in/s**、转向低于 **4°/s** 连续 **4.5 秒** 时，刹车后跳过该段，再从实测位姿接下一段。第 1、3、7 段超时后仍尝试射击，第 4 段需到位才放下 FR/FL。Pinpoint 短暂失读时刹车等待，持续失效约 **250 ms** 时停止自动。路线与控制参数仍需实车确认。
+
+自动结束或中途 STOP 后，保持 Pinpoint 通电再切手动。两种手动以同一 PP 起点解释传感器累计读数，INIT 的「接续位姿」用于核对当前位置。
+
 ## 比赛操控
 
 ### INIT
 
-1. 将机器人摆到目标起点，保持底盘静止，让 Pinpoint 校零。场地左下角为原点，位置以**右、前**为正，每格为 **609.6 mm**。车头面向场地前方为 **0°**，向左为正。
-2. 用手柄 1 的方向键录入实际起点，每按一次调整 **0.25 格**。**LB** 将初始航向加 **15°**，**RB** 减 **15°**。默认起点对应车身贴场地左、下两边且车头朝前。
-3. 将云台轻轻摆到标定时的最右端，再按 **START**。程序以该位置为本次云台零位。
+1. 两种手动模式沿用 Pinpoint 已累计的位移与航向，按 APK 中的 PP 起点转换为场地坐标。INIT 显示「PP 起点」和「接续位姿」，切换自动与手动时保持传感器通电。
+2. 核对「接续位姿」。需要重新对齐时，将机器人放回原手动角并朝原手动正前方，START 后按 **Y**。场地位置仍以右、前为正，每格 **609.6 mm**，正前为 0°、向左为正。
+3. 将云台轻轻摆到标定时的最右端，再按 **START** 采本次云台零位。手动 INIT 使用 Pinpoint 现有读数，自动 INIT 执行传感器校零。
 
 ### START 后
 
@@ -160,7 +186,8 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | 左摇杆 | 麦轮平移。航向可用时按场地坐标无头驾驶，航向丢失时切换为车头坐标 |
 | 右摇杆横向 | 旋转底盘，加载有效 07 校准后使用左右转向映射与电压补偿 |
 | 方向键左 / 右 | 当前飞轮目标每按一次减 / 加 100 RPM |
-| 方向键上 / 下 | 云台零位每按一次加 / 减 0.5° |
+| 方向键上 | 同步切换 FR/FL 的收回与放下位置 |
+| Back + 方向键上 / 方向键下 | 云台零位每按一次加 / 减 0.5° |
 | R3（未按 Back）/ L3 | 切换转速锁 / 清零云台微调 |
 | Back + R3 | 切换云台解耦 |
 | LB | 放下吸取机构并吸取，松开后抬起 |
@@ -168,7 +195,7 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | RB | 反转清料，同时关闭挡弹舵机。反转优先于射击和吸取 |
 | A | 以当前车头方向重设手柄的无头正前方 |
 | X | 切换自动瞄准与锁定当前场地方向 |
-| Y | 将机器人放回 INIT 输入的起点和朝向后，重新对齐场地坐标 |
+| Y | 将机器人放回原手动角并朝原手动正前方后，重新对齐场地坐标 |
 | Back（按住） | 查看 Pinpoint、云台和飞轮诊断，含实际加载的 PID |
 
 手柄 2 的 R3 也可切换云台解耦。解耦时云台电机停止输出，RT 跳过角度等待。云台未配置、未标定、反馈不可用，或场地航向及最近位置不可用时，也会跳过角度等待。供弹仍受禁射、目标转速、飞轮与供弹机构状态限制。
@@ -179,7 +206,7 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 
 启动 **goBILDA Pinpoint Example**，INIT 时保持底盘静止，START 后用左摇杆平移、右摇杆横向转向。屏幕显示位置、速度、原始编码器计数、坏读次数和最近异常，异常同时写入 Robot Controller 日志。停稳后按 **A** 将位姿归零并重校 IMU，按 **B** 仅重校 IMU。
 
-主程序按采样间隔检查航向变化与陀螺仪角速度是否一致。I²C 读取失败后，重试间隔从 50 ms 逐步延长到 500 ms，恢复读取后回到正常采样。丢帧时保留上一帧有效位置和航向，航向失效超过 120 ms 后切换为车头模式。需要重新对齐时，将机器人放回 INIT 输入的起点和朝向，再按 **Y**。
+主程序按采样间隔检查航向变化与陀螺仪角速度是否一致。I²C 读取失败后，重试间隔从 50 ms 逐步延长到 500 ms，恢复读取后回到正常采样。丢帧时保留上一帧有效位置和航向，航向失效超过 120 ms 后切换为车头模式。需要重新对齐时，将机器人放回原手动角并朝原手动正前方，再按 **Y**。
 
 ### 自动瞄准与射击
 
@@ -190,17 +217,24 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 
 ### Biobuzz角落出发
 
-该模式把两半场测点换算到同一个基准半场，拟合等效得分点、射向残差及距离与 RPM 的关系。INIT 显示模型来源。起点录入与驾驶按键沿用普通主控。
+该模式把两半场测点换算到同一个基准半场，拟合等效得分点、射向残差及距离与 RPM 的关系。INIT 显示模型来源，定位接续和驾驶按键沿用普通主控。
 
-当前 `RobotConfig.ENABLE_MOVING_LEAD = false`，角落模式按云台转轴的当前位置查询射击地图。启用该开关后，按机构延迟、飞行时间估计与刹停模型计算平移提前量，上限为 **450 mm**。高速直射时飞轮持续跟随当前目标，缺少可用的 06 数据时用默认转速加微调。禁射区内，或开启转速锁且松开 RT 时，飞轮保持至多 **2500 RPM**。按住 RT 跑打时四轮输出上限初设为 **75%**。
+当前 `RobotConfig.ENABLE_MOVING_LEAD = false`，角落模式按云台转轴的当前位置查询射击地图。启用该开关后，按机构延迟、飞行时间估计与刹停模型计算平移提前量，上限为 **450 mm**。高速直射时飞轮持续跟随当前目标，缺少可用的 06 数据时用默认转速加微调。禁射区内，或开启转速锁且松开 RT 时，飞轮保持至多 **2500 RPM**。正常电压下底盘输出上限为 **100%**，按住 **RT** 跑打时同样适用，低压时仍受 80% 上限约束。
 
 禁射矩形同为右 2–4 格、前 2.5–3.5 格，该模式按实际航向投影车身四角，定位有效且整车四角都在矩形内时禁射。
+
+仓库的 [测点/](测点) 提供当前 46 条记录的 `shot_records.json` 与 `shot_model.json`，另有 35 条记录的 V1 存档。使用方式见 [测点/README.md](测点/README.md)，可导入工作台或按文件用途复制到 Hub。
 
 ## 代码入口
 
 | 文件或目录 | 用途 |
 | --- | --- |
-| [BioBuzzTeleOp.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/BioBuzzTeleOp.java) | 比赛主控，协调手柄输入、底盘、定位、瞄准、供弹与状态灯 |
+| [BioBuzzTeleOp.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/BioBuzzTeleOp.java) | 比赛主控、Pinpoint 位姿接续、手柄输入与机构协调 |
+| [BioBuzzPedroAuto.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/BioBuzzPedroAuto.java) / [PedroRoute.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/PedroRoute.java) | 自动路径执行、JSON 路线解析与超时衔接 |
+| [PedroPinpointLocalizer.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/PedroPinpointLocalizer.java) | Pinpoint 与 Pedro 的毫米／英寸坐标转换 |
+| [PedroAutoMechanisms.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/PedroAutoMechanisms.java) / [AutoVolley.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/AutoVolley.java) | 自动机构阶段、射击等待与实际供弹计时 |
+| [CornerAim.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/CornerAim.java) / [ShotSequence.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/ShotSequence.java) | 自动与手动共享射界查询、禁射区和供弹判定 |
+| [TaskServos.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/TaskServos.java) | FR/FL 成对切换与停机收回 |
 | [RobotConfig.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/RobotConfig.java) | 硬件名称、方向、机械尺寸、里程轮参数和功率限制 |
 | [BatteryVoltage.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/BatteryVoltage.java) | 电池采样、12 V 标称电压与占空比换算、低压状态 |
 | [ControlLoop.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/ControlLoop.java) / [HardwareStop.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/HardwareStop.java) | 15 ms 控制周期、逐帧 Hub 缓存与异常停机处理 |
@@ -217,6 +251,7 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | [TurretPidTuning.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration/TurretPidTuning.java) | 云台 10–16 个有效轮的 PID 搜索、留出复测与回转验收 |
 | [calibration/](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/calibration) | 自测 OpMode、模型拟合与 PID 参数搜索 |
 | [射击拟合工作台/](射击拟合工作台) | 离线数据导入、拟合、可视化和 JSON / CSV 导出 |
+| [PP/](PP) / [测点/](测点) | 自动路线源文件、实测记录与射界模型存档 |
 | [FtcRobotController/](FtcRobotController) | FIRST SDK 的 Robot Controller 基础工程与示例 |
 
 ## 上游项目与许可

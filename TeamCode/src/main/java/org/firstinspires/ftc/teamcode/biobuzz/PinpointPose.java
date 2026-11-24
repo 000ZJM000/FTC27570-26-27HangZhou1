@@ -29,6 +29,7 @@ public final class PinpointPose {
     private double lastHeadingSampleTime;
     private double lastYawRate, observedYaw = Double.NaN, observedYawRate = Double.NaN;
     private boolean headingRejected, positionRejected;
+    private boolean readExistingOrigin;
     private double nextRead, readRetryDelay = READ_RETRY_SECONDS, nextScopeRestore;
     private int rawX, rawY;
     public boolean headingValid, positionValid;
@@ -53,6 +54,12 @@ public final class PinpointPose {
         this.battery = battery;
     }
 
+    void readExistingFrame() {
+        // Both TeleOps use the running device without writing any sensor registers.
+        readExistingOrigin = started = true;
+        clearReadBackoff();
+    }
+
     public boolean startImu() {
         if (device == null) return false;
         started = headingValid = podsValid = positionValid = false;
@@ -60,6 +67,7 @@ public final class PinpointPose {
             configure();
             device.resetPosAndIMU();
             started = true;
+            readExistingOrigin = false;
             anchored = positionAnchored = needsAnchor = positionNeedsAnchor = false;
             headingShift = 0;
             lastHeadingTime = Double.NEGATIVE_INFINITY;
@@ -99,8 +107,16 @@ public final class PinpointPose {
         if (readStart < nextRead) return;
 
         try {
+            if (firmwareVersion == 0) {
+                int version = device.getDeviceVersion();
+                if (version < 1) {
+                    failRead("等待 Pinpoint 固件读数", readStart);
+                    return;
+                }
+                firmwareVersion = version;
+            }
             // A Pinpoint restart can discard the custom bulk layout. Probe it infrequently.
-            if (firmwareVersion >= 3 && badReadStreak >= 4 && readStart >= nextScopeRestore) {
+            if (!readExistingOrigin && firmwareVersion >= 3 && badReadStreak >= 4 && readStart >= nextScopeRestore) {
                 nextScopeRestore = readStart + BULK_SCOPE_RETRY_SECONDS;
                 restoreBulkScope();
                 return;
@@ -118,8 +134,10 @@ public final class PinpointPose {
             }
             clearReadBackoff();
 
-            if (anchored && (state == DeviceStatus.CALIBRATING || state == DeviceStatus.NOT_READY
-                    || state == DeviceStatus.FAULT_IMU_RUNAWAY)) needsAnchor = true;
+            if (state == DeviceStatus.CALIBRATING || state == DeviceStatus.NOT_READY
+                    || state == DeviceStatus.FAULT_IMU_RUNAWAY) {
+                if (anchored) needsAnchor = true;
+            }
             boolean ready = state == DeviceStatus.READY;
             if (!ready && state != DeviceStatus.FAULT_X_POD_NOT_DETECTED
                     && state != DeviceStatus.FAULT_Y_POD_NOT_DETECTED
@@ -243,11 +261,8 @@ public final class PinpointPose {
             } else status = jumped ? "Pinpoint 位置跳变" : "Pinpoint 位置非有限值";
             return;
         }
-        double x = localX - originX, y = localY - originY;
-        double c = Math.cos(headingShift), s = Math.sin(headingShift);
         double previousForward = forward, previousLeft = left;
-        forward = fieldForward + c * x - s * y;
-        left = fieldLeft + s * x + c * y;
+        projectPosition();
         if (!positionRejected && elapsed > 0 && elapsed <= POSITION_GRACE) {
             double blend = elapsed / (0.075 + elapsed);
             forwardVelocity += blend * ((forward - previousForward) / elapsed - forwardVelocity);
@@ -262,7 +277,7 @@ public final class PinpointPose {
         if (!headingValid || Maths.time() - lastHeadingTime > HEADING_GRACE) return false;
         if (requiresReanchor() && !podsValid) return false;
         if (positionAnchored && !requiresReanchor() && !positionValid) return false;
-        if (needsAnchor) {
+        if (needsAnchor && !readExistingOrigin) {
             try {
                 configure();
             } catch (RuntimeException failure) {
@@ -271,13 +286,30 @@ public final class PinpointPose {
             update();
             if (!headingValid || !podsValid) return false;
         }
+        setFrame(forwardMm, rightMm, localX, localY, Maths.wrap(fieldHeading - sensorYaw));
+        return true;
+    }
+
+    boolean anchorSensorOrigin(double forwardMm, double rightMm, double fieldHeading) {
+        if (!canAnchorPosition() || requiresReanchor()) return false;
+        setFrame(forwardMm, rightMm, 0, 0, fieldHeading);
+        return true;
+    }
+
+    boolean anchorManualCorner() {
+        return canAnchorPosition()
+                && anchor(RobotConfig.CENTER_FROM_REAR_EDGE_MM, RobotConfig.CENTER_FROM_LEFT_EDGE_MM, 0);
+    }
+
+    private void setFrame(double forwardMm, double rightMm, double x, double y, double yawShift) {
         forward = fieldForward = forwardMm;
         left = fieldLeft = -rightMm;
         forwardVelocity = leftVelocity = 0;
-        originX = localX;
-        originY = localY;
-        headingShift = Maths.wrap(fieldHeading - sensorYaw);
-        heading = Maths.wrap(fieldHeading);
+        originX = x;
+        originY = y;
+        headingShift = yawShift;
+        if (podsValid) projectPosition();
+        heading = Maths.wrap(sensorYaw + headingShift);
         yawRate = lastYawRate;
         copySample(lastHeadingSampleTime);
         anchored = true;
@@ -285,10 +317,17 @@ public final class PinpointPose {
         positionRejected = false;
         positionAnchored = positionValid = podsValid;
         if (positionValid) status = DeviceStatus.READY.name();
-        return true;
+    }
+
+    private void projectPosition() {
+        double x = localX - originX, y = localY - originY;
+        double c = Math.cos(headingShift), s = Math.sin(headingShift);
+        forward = fieldForward + c * x - s * y;
+        left = fieldLeft + s * x + c * y;
     }
 
     public boolean isAnchored() { return anchored && !needsAnchor; }
+    boolean canAnchorPosition() { return headingValid && podsValid; }
     public boolean hasPositionAnchor() { return positionAnchored && !requiresReanchor(); }
     public boolean requiresReanchor() { return needsAnchor || positionNeedsAnchor; }
     public int encoderX() { return rawX; }
