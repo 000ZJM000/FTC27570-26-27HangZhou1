@@ -1,6 +1,6 @@
 package org.firstinspires.ftc.teamcode.biobuzz.calibration;
 
-import org.firstinspires.ftc.teamcode.biobuzz.Maths;
+import org.firstinspires.ftc.teamcode.biobuzz.core.Maths;
 
 import java.util.ArrayList;
 import java.util.Arrays;

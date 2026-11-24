@@ -1,13 +1,17 @@
 package org.firstinspires.ftc.teamcode.biobuzz.calibration;
 
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
-import org.firstinspires.ftc.teamcode.biobuzz.BatteryVoltage;
-import org.firstinspires.ftc.teamcode.biobuzz.CalibrationStore;
-import org.firstinspires.ftc.teamcode.biobuzz.ControlLoop;
-import org.firstinspires.ftc.teamcode.biobuzz.Maths;
-import org.firstinspires.ftc.teamcode.biobuzz.PinpointPose;
-import org.firstinspires.ftc.teamcode.biobuzz.RearStatusLed;
+import org.firstinspires.ftc.teamcode.biobuzz.config.CalibrationStore;
+import org.firstinspires.ftc.teamcode.biobuzz.core.BatteryVoltage;
+import org.firstinspires.ftc.teamcode.biobuzz.core.ControlLoop;
+import org.firstinspires.ftc.teamcode.biobuzz.core.Maths;
+import org.firstinspires.ftc.teamcode.biobuzz.localization.PinpointPose;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.RearStatusLed;
 
+import java.util.ArrayList;
+import java.util.List;
+
+/** Base LinearOpMode for self-tests, bundling loop control, measurements, and step scoring. */
 abstract class CalibrationOp extends LinearOpMode {
     CalibrationStore store;
     BatteryVoltage battery;
@@ -47,7 +51,7 @@ abstract class CalibrationOp extends LinearOpMode {
                 sleep(100);
             }
         } finally {
-            lights.stop();
+            ControlLoop.safeStop("尾灯", lights::stop);
         }
     }
 
@@ -104,7 +108,7 @@ abstract class CalibrationOp extends LinearOpMode {
     boolean runFor(double duration, Tick task) throws InterruptedException {
         if (opModeIsActive() && !motionAborted()) lights.show(RearStatusLed.State.CAL_RUNNING);
         try (ControlLoop loop = new ControlLoop(hardwareMap)) {
-            double start = Maths.time(), previous = start - ControlLoop.PERIOD;
+            double start = Maths.time(), previous = start - ControlLoop.CALIBRATION_PERIOD;
             while (opModeIsActive() && !motionAborted()) {
                 double now = loop.beginFrame(), elapsed = now - start;
                 if (elapsed >= duration) return true;
@@ -160,5 +164,114 @@ abstract class CalibrationOp extends LinearOpMode {
         battery.update(Maths.time());
         if (battery.measured()) telemetry.addData("12V 电压补偿", "实测 %.2f V / 标称 12.00 V", battery.volts());
         else telemetry.addData("12V 电压补偿", "等待电池读数，标称 12.00 V");
+    }
+
+    /** Robust median / Theil-Sen helper for noisy calibration samples. */
+    static final class Measurements {
+        private final double[] values = new double[256];
+        private int count;
+
+        void add(double value) {
+            if (Double.isFinite(value) && count < values.length) values[count++] = value;
+        }
+
+        double median() { return Maths.median(values, count); }
+        int size() { return count; }
+
+        double relativeSpread() {
+            double middle = median();
+            double[] differences = new double[count];
+            for (int i = 0; i < count; i++) differences[i] = Math.abs(values[i] - middle);
+            return Maths.median(differences, count) / Math.max(1e-9, Math.abs(middle));
+        }
+
+        static final class PowerFit {
+            private final List<double[]> points = new ArrayList<>();
+
+            void add(double speed, double power) {
+                if (speed > 0 && Maths.finite(speed, power)) points.add(new double[]{speed, power});
+            }
+
+            double[] fit(double minimumSpeedDifference) {
+                Measurements slopes = new Measurements();
+                for (int i = 0; i < points.size(); i++) {
+                    for (int j = i + 1; j < points.size(); j++) {
+                        double[] a = points.get(i), b = points.get(j);
+                        double dx = b[0] - a[0];
+                        if (Math.abs(dx) > minimumSpeedDifference) slopes.add((b[1] - a[1]) / dx);
+                    }
+                }
+                double slope = slopes.median();
+                if (slopes.size() < 2 || !(slope > 0)) return null;
+                Measurements intercepts = new Measurements();
+                for (double[] point : points) intercepts.add(point[1] - slope * point[0]);
+                return new double[]{Math.max(0, intercepts.median()), slope};
+            }
+        }
+    }
+
+    /** Normalized step response cost evaluator. */
+    static final class StepScore {
+        private final double duration;
+        private double errorArea, overshoot, tailTime, tailError, tailSquare, effort, lastPower;
+        private double lastSample, withinToleranceSince = Double.NaN;
+        private double quietTime, quietError, quietSquare, quietAbsolute;
+        private boolean endedEarly;
+
+        StepScore(double duration) { this.duration = duration; }
+
+        void sample(double time, double dt, double progress, double power, boolean withinTolerance) {
+            double error = 1 - progress;
+            errorArea += Math.abs(error) * dt;
+            overshoot = Math.max(overshoot, -error);
+            effort += Math.abs(power - lastPower);
+            lastPower = power;
+            if (time > duration * 0.65) {
+                tailTime += dt;
+                tailError += error * dt;
+                tailSquare += error * error * dt;
+            }
+            lastSample = time;
+            if (withinTolerance) {
+                if (!Double.isFinite(withinToleranceSince)) withinToleranceSince = time;
+                quietTime += dt;
+                quietError += error * dt;
+                quietSquare += error * error * dt;
+                quietAbsolute += Math.abs(error) * dt;
+            } else {
+                withinToleranceSince = Double.NaN;
+                quietTime = quietError = quietSquare = quietAbsolute = 0;
+            }
+        }
+
+        boolean finishIfSettled(double hold) {
+            endedEarly = Double.isFinite(settlingTime(hold));
+            return endedEarly;
+        }
+
+        double settlingTime(double hold) {
+            return lastSample - withinToleranceSince >= hold
+                    ? withinToleranceSince + hold : Double.POSITIVE_INFINITY;
+        }
+
+        double scoreWithSettlingTime(double hold) {
+            return 1.65 * settlingTime(hold) / duration + 0.50 * score();
+        }
+
+        double overshoot() { return overshoot; }
+
+        double score() {
+            if (endedEarly) {
+                double area = errorArea + Math.max(0, duration - lastSample) * quietAbsolute / quietTime;
+                return score(area, quietError / quietTime, quietSquare / quietTime);
+            }
+            if (tailTime < duration * 0.12) return Double.POSITIVE_INFINITY;
+            return score(errorArea, tailError / tailTime, tailSquare / tailTime);
+        }
+
+        private double score(double area, double mean, double meanSquare) {
+            double deviation = Math.sqrt(Math.max(0, meanSquare - mean * mean));
+            return area / duration + 1.8 * Math.abs(mean) + 2 * deviation + 1.5 * overshoot + 0.07 * effort;
+        }
     }
 }

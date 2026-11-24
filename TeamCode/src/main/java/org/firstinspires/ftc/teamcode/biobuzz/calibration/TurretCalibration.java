@@ -1,19 +1,19 @@
 package org.firstinspires.ftc.teamcode.biobuzz.calibration;
 
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
-import org.firstinspires.ftc.teamcode.biobuzz.CalibrationStore;
-import org.firstinspires.ftc.teamcode.biobuzz.Drive;
-import org.firstinspires.ftc.teamcode.biobuzz.Maths;
-import org.firstinspires.ftc.teamcode.biobuzz.PinpointPose;
-import org.firstinspires.ftc.teamcode.biobuzz.RobotConfig;
-import org.firstinspires.ftc.teamcode.biobuzz.Turret;
-import org.firstinspires.ftc.teamcode.biobuzz.TurretPlant;
+import org.firstinspires.ftc.teamcode.biobuzz.config.CalibrationStore;
+import org.firstinspires.ftc.teamcode.biobuzz.config.RobotConfig;
+import org.firstinspires.ftc.teamcode.biobuzz.core.Maths;
+import org.firstinspires.ftc.teamcode.biobuzz.localization.PinpointPose;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Drive;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Turret;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.TurretModels.Plant;
 
 @TeleOp(name = "02 云台全套 12V补偿·联动·PID", group = "BIOBUZZ 自测")
 public final class TurretCalibration extends CalibrationOp {
     private int homeTick;
     private String geometry = "未测", plant = "未测", friction = "未测", coupling = "未测", pid = "未测";
-    private TurretPidTuning tuning;
+    private TurretPidCalibration.Tuning tuning;
 
     @Override String intro() {
         return "一次完成行程、12V 动力学与摩擦、底盘联动、云台 PID 及回转验收。";
@@ -42,7 +42,7 @@ public final class TurretCalibration extends CalibrationOp {
             turret.homeAtRight(homeTick);
             if (!turret.plantIdentified() || confirm("A 重测 12V 动力学与刹车模型，B 沿用已有动力学。")) {
                 if (!center(turret)) return;
-                while (!new TurretQuickIdentification(this, turret).run()) {
+                while (!TurretIdentify.runQuickIdentification(this, turret)) {
                     plant = "未通过，保留上次值";
                     if (!opModeIsActive() || motionAborted()
                             || !confirm("12V 动力学未通过。A 回中后重试，B 结束。") || !center(turret)) return;
@@ -52,7 +52,7 @@ public final class TurretCalibration extends CalibrationOp {
                 plant = "沿用已保存";
             }
             if (!turret.hasFrictionMap() || confirm("A 重测六点静/动摩擦表，B 沿用已有摩擦表。")) {
-                TurretFrictionCalibration measurement = new TurretFrictionCalibration(this);
+                TurretIdentify.FrictionRun measurement = new TurretIdentify.FrictionRun(this);
                 friction = measurement.run(turret);
                 if (!opModeIsActive() || motionAborted() || measurement.feedbackLost()) return;
             } else {
@@ -80,9 +80,9 @@ public final class TurretCalibration extends CalibrationOp {
             try {
                 if (runCoupling) {
                     double[] startingGains = turret.pidGains();
-                    TurretPlant model = TurretPlant.load(store);
+                    Plant model = Plant.load(store);
                     turret.setPidGains(model.pidSeed(model.baseline()));
-                    coupling = new TurretYawCalibration(this).run(drive, pose, turret)
+                    coupling = YawCalibration.runCoupling(this, drive, pose, turret)
                             ? "双向验收并保存" : "未通过，沿用上次值";
                     if (!opModeIsActive() || motionAborted() || !turret.motorResponding()) return;
                     turret.setPidGains(startingGains);
@@ -90,7 +90,7 @@ public final class TurretCalibration extends CalibrationOp {
                     coupling = "沿用已保存";
                 }
                 if (runPid) {
-                    tuning = new TurretPidTuning(this);
+                    tuning = new TurretPidCalibration.Tuning(this);
                     pid = tuning.tune(turret, drive, pose) ? "已验收并保存" : "未验收，沿用上次值";
                 } else {
                     pid = "沿用已保存";

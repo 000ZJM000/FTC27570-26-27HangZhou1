@@ -25,6 +25,10 @@ abstract class PackagePedroRoute extends DefaultTask {
     @PathSensitive(PathSensitivity.NONE)
     abstract RegularFileProperty getRouteFile()
 
+    @InputFile
+    @PathSensitive(PathSensitivity.NONE)
+    abstract RegularFileProperty getShotModelFile()
+
     @OutputDirectory
     abstract DirectoryProperty getAssetsDirectory()
 
@@ -34,11 +38,16 @@ abstract class PackagePedroRoute extends DefaultTask {
     @TaskAction
     void packageRoute() {
         def source = routeFile
+        def shotModel = shotModelFile
         def assets = assetsDirectory
         fileSystemOperations.sync {
             from(source) {
                 into('pedro')
                 rename { 'two-group-route.json' }
+            }
+            from(shotModel) {
+                into('biobuzz')
+                rename { 'shot_model.json' }
             }
             into(assets)
         }
@@ -47,6 +56,7 @@ abstract class PackagePedroRoute extends DefaultTask {
 
 def copyPedroRoute = tasks.register('copyPedroRoute', PackagePedroRoute) {
     routeFile.set(rootProject.layout.projectDirectory.file('PP/吸两组设三组2T-3.json'))
+    shotModelFile.set(rootProject.layout.projectDirectory.file('测点/shot_model.json'))
     assetsDirectory.set(layout.buildDirectory.dir('generated/pedroRouteAssets'))
 }
 

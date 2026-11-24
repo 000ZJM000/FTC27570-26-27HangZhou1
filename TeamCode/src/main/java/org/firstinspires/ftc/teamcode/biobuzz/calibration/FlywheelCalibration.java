@@ -2,12 +2,13 @@ package org.firstinspires.ftc.teamcode.biobuzz.calibration;
 
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.DcMotorSimple.Direction;
-import org.firstinspires.ftc.teamcode.biobuzz.BatteryVoltage;
-import org.firstinspires.ftc.teamcode.biobuzz.CalibrationStore;
-import org.firstinspires.ftc.teamcode.biobuzz.Flywheel;
-import org.firstinspires.ftc.teamcode.biobuzz.Intake;
-import org.firstinspires.ftc.teamcode.biobuzz.LeastSquares;
-import org.firstinspires.ftc.teamcode.biobuzz.RobotConfig;
+import org.firstinspires.ftc.teamcode.biobuzz.calibration.CalibrationOp.Measurements;
+import org.firstinspires.ftc.teamcode.biobuzz.config.CalibrationStore;
+import org.firstinspires.ftc.teamcode.biobuzz.config.RobotConfig;
+import org.firstinspires.ftc.teamcode.biobuzz.core.BatteryVoltage;
+import org.firstinspires.ftc.teamcode.biobuzz.core.Maths.LeastSquares;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Flywheel;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Intake;
 
 import java.util.ArrayList;
 import java.util.List;

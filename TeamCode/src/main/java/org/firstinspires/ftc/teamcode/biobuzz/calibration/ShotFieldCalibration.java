@@ -8,19 +8,18 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import org.firstinspires.ftc.robotcore.external.Telemetry;
-import org.firstinspires.ftc.teamcode.biobuzz.BatteryVoltage;
-import org.firstinspires.ftc.teamcode.biobuzz.CalibratedShotMap;
-import org.firstinspires.ftc.teamcode.biobuzz.CalibrationStore;
-import org.firstinspires.ftc.teamcode.biobuzz.ControlLoop;
-import org.firstinspires.ftc.teamcode.biobuzz.FieldTargets;
-import org.firstinspires.ftc.teamcode.biobuzz.Flywheel;
-import org.firstinspires.ftc.teamcode.biobuzz.Intake;
-import org.firstinspires.ftc.teamcode.biobuzz.Maths;
-import org.firstinspires.ftc.teamcode.biobuzz.RobotConfig;
-import org.firstinspires.ftc.teamcode.biobuzz.ShotRecords;
-import org.firstinspires.ftc.teamcode.biobuzz.ShotVectorField;
-import org.firstinspires.ftc.teamcode.biobuzz.ShotVectorField.PointData;
-import org.firstinspires.ftc.teamcode.biobuzz.Turret;
+import org.firstinspires.ftc.teamcode.biobuzz.config.CalibrationStore;
+import org.firstinspires.ftc.teamcode.biobuzz.config.RobotConfig;
+import org.firstinspires.ftc.teamcode.biobuzz.core.BatteryVoltage;
+import org.firstinspires.ftc.teamcode.biobuzz.core.ControlLoop;
+import org.firstinspires.ftc.teamcode.biobuzz.core.Maths;
+import org.firstinspires.ftc.teamcode.biobuzz.shooting.Aiming.FieldTargets;
+import org.firstinspires.ftc.teamcode.biobuzz.shooting.ShotMap;
+import org.firstinspires.ftc.teamcode.biobuzz.shooting.ShotVectorField;
+import org.firstinspires.ftc.teamcode.biobuzz.shooting.ShotVectorField.PointData;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Flywheel;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Intake;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Turret;
 
 @TeleOp(name = "06 半场射击校准·数据", group = "BIOBUZZ 自测")
 public final class ShotFieldCalibration extends LinearOpMode {
@@ -105,7 +104,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
             loop.beginFrame();
             if (turret.calibrated()) turret.homeAtRight();
             field = new ShotVectorField(store, rightHalf);
-            ShotRecords.export(store);
+            ShotMap.exportRecords(store);
             refreshDataView();
             maxRpm = flywheel.maxTargetRpm();
             targetRpm = Math.min(RobotConfig.FLYWHEEL_TARGET_RPM, maxRpm);
@@ -217,7 +216,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
             if (saved) {
                 pending = null;
                 status = unreachable ? "已标为不可达" : "已解除不可达标记";
-                if (!ShotRecords.export(store)) status += "，JSON 导出失败";
+                if (!ShotMap.exportRecords(store)) status += "，JSON 导出失败";
                 refreshDataView();
             } else status = "保存不可达状态失败，请重试";
             return;
@@ -227,7 +226,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
             else if (point == null ? field.save(column, row, pending, trialVoltage, trialPitch)
                     : field.save(point, pending, trialVoltage, trialPitch)) {
                 pending = null;
-                status = ShotRecords.export(store) ? "已保存当前点向量及 JSON" : "向量已保存，JSON 导出失败";
+                status = ShotMap.exportRecords(store) ? "已保存当前点向量及 JSON" : "向量已保存，JSON 导出失败";
                 refreshDataView();
             } else status = "保存向量失败，请重试";
             return;
@@ -266,7 +265,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
                         pending = null;
                     }
                 }
-                status = ShotRecords.export(store) ? "两半场旧 v1 精测已清空并更新 JSON" : "已清空旧 v1，JSON 导出失败";
+                status = ShotMap.exportRecords(store) ? "两半场旧 v1 精测已清空并更新 JSON" : "已清空旧 v1，JSON 导出失败";
                 refreshDataView();
             } else status = "旧精测清空失败";
             return true;
@@ -305,7 +304,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
             return;
         }
         if (current.y && !previous.y) {
-            status = ShotRecords.export(store) ? ShotRecords.FILE + " 已重新导出" : "JSON 导出失败";
+            status = ShotMap.exportRecords(store) ? ShotMap.RECORDS_FILE + " 已重新导出" : "JSON 导出失败";
             refreshDataView();
             return;
         }
@@ -339,13 +338,13 @@ public final class ShotFieldCalibration extends LinearOpMode {
         allCompactRows.addAll(compactRows(allPoints));
         recordedCompactRows.clear();
         recordedCompactRows.addAll(compactRows(recordedPoints));
-        modelStatus = new CalibratedShotMap(store).description();
+        modelStatus = new ShotMap(store).description();
     }
 
     private String jsonFilesStatus() {
         return String.format(Locale.ROOT, "records:%s | model:%s (%s)",
-                store.hasJsonFile(ShotRecords.FILE) ? "有" : "无",
-                store.hasJsonFile(CalibratedShotMap.FILE) ? "有" : "无",
+                store.hasJsonFile(ShotMap.RECORDS_FILE) ? "有" : "无",
+                store.hasJsonFile(ShotMap.FILE) ? "有" : "无",
                 modelStatus);
     }
 
@@ -356,7 +355,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
         }
         double x = point == null ? field.centerRightTiles(column) : point.rightTiles;
         double y = point == null ? field.centerForwardTiles(row) : point.forwardTiles;
-        CalibratedShotMap model = new CalibratedShotMap(store);
+        ShotMap model = new ShotMap(store);
         ShotVectorField.Vector guess = model.preview(x, y);
         double bearing = guess != null ? guess.bearing()
                 : FieldTargets.fromPose(y * RobotConfig.TILE_MM, -x * RobotConfig.TILE_MM, 0).bearing;
