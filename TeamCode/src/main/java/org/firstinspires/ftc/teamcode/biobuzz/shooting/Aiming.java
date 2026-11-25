@@ -31,7 +31,8 @@ public final class Aiming {
             ShotMotion motion = new ShotMotion(pose);
             ShotVectorField.Vector shot = motion.predict(map, rightHalf, braking);
             if (shot == null) return null;
-            return new CornerAim(rightHalf ? 4 : 3, shot, motion.lineRate(map.goalRight(rightHalf), map.goalForward()));
+            return new CornerAim(rightHalf ? 4 : 3, shot,
+                    motion.lineRate(map.goalRight(rightHalf), map.goalForward(rightHalf)));
         }
 
         public static double targetRpm(CornerAim aim) {
@@ -124,20 +125,30 @@ public final class Aiming {
             if (!RobotConfig.ENABLE_MOVING_LEAD) {
                 return map.sample(right / tile, forward / tile, rightHalf);
             }
-            double range = Math.hypot(right - tile * map.goalRight(rightHalf), forward - tile * map.goalForward());
-            double flight = flightTime(range);
+            double goalRightMm = tile * map.goalRight(rightHalf);
+            double goalForwardMm = tile * map.goalForward(rightHalf);
+            double range = Math.hypot(right - goalRightMm, forward - goalForwardMm);
             double delay = RobotConfig.SHOT_RELEASE_SECONDS;
-            double vf = cos * forwardRate - sin * rightRate;
-            double vr = sin * forwardRate + cos * rightRate;
-            double along = lead(vf, braking ? RobotConfig.BRAKE_FORWARD_MM_S2 : 0, delay, flight);
-            double across = lead(vr, braking ? RobotConfig.BRAKE_SIDE_MM_S2 : 0, delay, flight);
-            double leadRight = -sin * along + cos * across;
-            double leadForward = cos * along + sin * across;
-            double leadNorm = Math.hypot(leadRight, leadForward);
-            if (leadNorm > 450) {
-                double scale = 450 / leadNorm;
-                leadRight *= scale;
-                leadForward *= scale;
+            double totalForwardRate = forwardRate + forwardOrbitRate;
+            double totalRightRate = rightRate + rightOrbitRate;
+            double vf = cos * totalForwardRate - sin * totalRightRate;
+            double vr = sin * totalForwardRate + cos * totalRightRate;
+            double maxLead = Math.min(Math.max(450.0, RobotConfig.SOTM_MAX_LEAD_MM), Math.max(450.0, 0.75 * range));
+            double scaleFactor = Math.max(0.0, RobotConfig.SOTM_LEAD_SCALE);
+            double flight = flightTime(range);
+            double leadRight = 0, leadForward = 0;
+            for (int iter = 0; iter < 2; iter++) {
+                double along = scaleFactor * lead(vf, braking ? RobotConfig.BRAKE_FORWARD_MM_S2 : 0, delay, flight);
+                double across = scaleFactor * lead(vr, braking ? RobotConfig.BRAKE_SIDE_MM_S2 : 0, delay, flight);
+                leadRight = -sin * along + cos * across;
+                leadForward = cos * along + sin * across;
+                double leadNorm = Math.hypot(leadRight, leadForward);
+                if (leadNorm > maxLead) {
+                    double clipScale = maxLead / leadNorm;
+                    leadRight *= clipScale;
+                    leadForward *= clipScale;
+                }
+                flight = flightTime(Math.hypot(right + leadRight - goalRightMm, forward + leadForward - goalForwardMm));
             }
             return map.sample((right + leadRight) / tile, (forward + leadForward) / tile, rightHalf);
         }
@@ -175,6 +186,8 @@ public final class Aiming {
         private boolean interrupted;
         private boolean feeding;
         private boolean blocked, turretReady, speedReady, intakeReady;
+        private boolean startupBlocked, rpmSettled, strictMode;
+        private double rpmReadySince = Double.NaN;
 
         public ShotSequence(Turret turret, Flywheel shooter, Intake intake, boolean calibratedMode) {
             this.turret = turret;
@@ -186,30 +199,77 @@ public final class Aiming {
         public boolean update(boolean triggerPressed, boolean reverseRequested, boolean noFireZone,
                               boolean trackingTurret, boolean turretZeroLock,
                               double targetRpm, boolean rpmLockEnabled) {
+            return update(triggerPressed, reverseRequested, noFireZone, trackingTurret,
+                    turretZeroLock, targetRpm, rpmLockEnabled, rpmLockEnabled, true, 0.0, false, 0.0);
+        }
+
+        public boolean update(boolean triggerPressed, boolean reverseRequested, boolean noFireZone,
+                              boolean trackingTurret, boolean turretZeroLock,
+                              double targetRpm, boolean rpmLockEnabled, boolean idleWhenNotFiring,
+                              boolean startupReady, double rpmSettleSeconds) {
+            return update(triggerPressed, reverseRequested, noFireZone, trackingTurret,
+                    turretZeroLock, targetRpm, rpmLockEnabled, idleWhenNotFiring, startupReady,
+                    rpmSettleSeconds, false, 0.0);
+        }
+
+        public boolean update(boolean triggerPressed, boolean reverseRequested, boolean noFireZone,
+                              boolean trackingTurret, boolean turretZeroLock,
+                              double targetRpm, boolean rpmLockEnabled, boolean idleWhenNotFiring,
+                              boolean startupReady, double rpmSettleSeconds,
+                              boolean stopWhenIdle, double strictSpinupTolerance) {
+            double now = Maths.time();
             boolean triggerHeld = triggerPressed && !reverseRequested;
+            strictMode = strictSpinupTolerance > 0;
+            boolean atLaunchSpeed = false;
             if (shooter != null) {
                 shooter.sample();
-                boolean prepare = (!rpmLockEnabled || triggerHeld) && !noFireZone && targetRpm > 0;
-                shooter.requestRpm(calibratedMode && !prepare ? IDLE_RPM : targetRpm);
+                if (stopWhenIdle && !triggerHeld) {
+                    if (shooter.target > 0 || shooter.output > 0) shooter.stop();
+                    rpmReadySince = Double.NaN;
+                } else {
+                    boolean prepare = (!idleWhenNotFiring || triggerHeld) && !noFireZone && targetRpm > 0;
+                    shooter.requestRpm(calibratedMode && !prepare ? IDLE_RPM : targetRpm);
+                    atLaunchSpeed = shooter.readyForShot(false);
+                    if (atLaunchSpeed && strictSpinupTolerance > 0 && shooter.ticksPerRev > 0) {
+                        double tolTicks = Math.max(50.0 * shooter.ticksPerRev / 60.0,
+                                strictSpinupTolerance * shooter.target);
+                        atLaunchSpeed = Math.abs(shooter.speed - shooter.target) <= tolTicks;
+                    }
+                    if (atLaunchSpeed) {
+                        if (!Double.isFinite(rpmReadySince)) rpmReadySince = now;
+                    } else {
+                        rpmReadySince = Double.NaN;
+                    }
+                }
+            } else {
+                rpmReadySince = Double.NaN;
             }
             blocked = reverseRequested || noFireZone || targetRpm <= 0 || intake == null || shooter == null
                     || shooter.faulted() || !shooter.rpmCalibrated() || !shooter.hasBlocker();
             boolean checkShot = triggerHeld && !blocked;
+            startupBlocked = !startupReady;
+            rpmSettled = rpmSettleSeconds <= 0
+                    || (Double.isFinite(rpmReadySince) && now - rpmReadySince >= rpmSettleSeconds);
             boolean turretAligned = turret == null || !turret.calibrated() || !turret.encoderReady()
                     || !turret.motorResponding()
                     || (turretZeroLock ? (turret.atForwardZero() || turret.stableForShot())
                     : (!trackingTurret || turret.aimReady() || turret.stableForShot()));
             turretReady = checkShot && (released || interrupted || turretAligned);
-            speedReady = checkShot && (!rpmLockEnabled || shooter.readyForShot(feeding));
+            speedReady = checkShot && (!rpmLockEnabled
+                    || (released ? shooter.readyForShot(feeding)
+                    : (startupReady && atLaunchSpeed && rpmSettled)));
             intakeReady = intake != null && intake.readyToFeed();
             return updateTrigger(triggerPressed, turretReady && intakeReady);
         }
 
+        public boolean isReleased() { return released; }
+
         public String waitingStatus() {
             if (interrupted) return "供弹已中断，松开 RT 后再按";
             if (blocked) return "检查云台、供弹机构和飞轮";
+            if (startupBlocked) return "等待开机飞轮预热";
             if (!turretReady) return "等待云台对准或停稳";
-            if (!speedReady) return "等待飞轮进入 −8% 至 +12% 转速区间";
+            if (!speedReady) return strictMode ? "等待飞轮从零达速稳态（±3.5%）" : "等待飞轮进入 −8% 至 +12% 转速区间";
             if (!intakeReady) return "等待吸取舵机抬起";
             return null;
         }

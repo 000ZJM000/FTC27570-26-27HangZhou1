@@ -25,6 +25,7 @@ import java.util.Map;
 /** Loads and parses PedroPathing Visualizer JSON route files from APK assets. */
 public final class PedroRoute {
     static final String ASSET = "pedro/two-group-route.json";
+    static final String WAIT_SHOOT_PARK_ASSET = "pedro/wait-shoot-park-route.json";
 
     public final Pose start;
     public final List<Leg> legs;
@@ -35,16 +36,20 @@ public final class PedroRoute {
     }
 
     public static PedroRoute load(AssetManager assets) throws IOException, JSONException {
-        return parse(readProject(assets));
+        return load(assets, ASSET);
+    }
+
+    public static PedroRoute load(AssetManager assets, String assetPath) throws IOException, JSONException {
+        return parse(readProject(assets, assetPath));
     }
 
     public static Pose loadStart(AssetManager assets) throws IOException, JSONException {
         return load(assets).start;
     }
 
-    private static JSONObject readProject(AssetManager assets) throws IOException, JSONException {
+    private static JSONObject readProject(AssetManager assets, String assetPath) throws IOException, JSONException {
         StringBuilder json = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(assets.open(ASSET), StandardCharsets.UTF_8))) {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(assets.open(assetPath), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) json.append(line);
         }
@@ -70,7 +75,9 @@ public final class PedroRoute {
             long before = line.getLong("waitBeforeMs"), after = line.getLong("waitAfterMs");
             if (before < 0 || after < 0) throw new JSONException("路径等待时间不能为负数");
             Pose end = point(line.getJSONObject("endPoint"));
-            legs.add(new Leg(path(from, end, line), line.optString("name", "未命名路径"), before, after));
+            String rawName = line.optString("name", "").trim();
+            String legName = rawName.isEmpty() ? ("Path " + (i + 1)) : rawName;
+            legs.add(new Leg(path(from, end, line), legName, before, after));
             from = end;
         }
         if (legs.isEmpty()) throw new JSONException("路径为空");

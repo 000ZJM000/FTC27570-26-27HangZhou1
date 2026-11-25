@@ -31,7 +31,7 @@ public final class CalibrationStore {
     public static final String TURRET_FRICTION_MAP = "turret_friction_by_angle_v2";
     public static final String TURRET_PID = "turret_single_pid_bayes_v1";
     public static final String TURRET_PID_STEADY_ERROR = "turret_pid_steady_error";
-    public static final String TURRET_PID_HISTORY = "turret_pid_long_step_history_v2";
+    public static final String TURRET_PID_HISTORY = "turret_pid_long_step_history_v5";
     public static final String TURRET_COUPLED_DYNAMICS = "turret_chassis_state_ff_v1";
     public static final String FLYWHEEL_DIRECTIONS = "flywheel_directions_v1";
     public static final String FLYWHEEL_SCALE = "flywheel_scale";
@@ -40,6 +40,7 @@ public final class CalibrationStore {
     public static final String FLYWHEEL_FULL_POWER_MODEL = "flywheel_model_full_power_v1";
     public static final String FLYWHEEL_PID = "flywheel_pid";
     public static final String FLYWHEEL_VOLTAGE_PID = "flywheel_12v_hybrid_pid_v1";
+    public static final String FLYWHEEL_PID_HISTORY = "flywheel_12v_pid_history_v3";
     public static final String TURN_LINEARITY = "drive_turn_linearity_v1";
 
     private static final String CALIBRATION = "calibration.json";
@@ -236,6 +237,26 @@ public final class CalibrationStore {
 
     public boolean has(String key) { return data.optJSONObject("values").has(key); }
     public boolean turretStale() { return !staleKeys(data).isEmpty(); }
+    public boolean isTurretKeyStale(String key) { return staleKeys(data).contains(key); }
+
+    public String turretStaleSummary() {
+        Set<String> keys = staleKeys(data);
+        if (keys.isEmpty()) return "";
+        StringBuilder summary = new StringBuilder();
+        for (String key : keys) {
+            if (summary.length() > 0) summary.append("、");
+            summary.append(describeStaleKey(key));
+        }
+        return summary.toString();
+    }
+
+    private static String describeStaleKey(String key) {
+        if (TURRET_PLANT.equals(key)) return "02动力学";
+        if (TURRET_FRICTION_MAP.equals(key)) return "02摩擦";
+        if (TURRET_PID.equals(key)) return "05 PID";
+        if (TURRET_COUPLED_DYNAMICS.equals(key)) return "03联动";
+        return key;
+    }
 
     private static Set<String> staleKeys(JSONObject document) {
         Set<String> keys = new LinkedHashSet<>();

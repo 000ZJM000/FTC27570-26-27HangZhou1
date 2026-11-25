@@ -1,9 +1,12 @@
 package org.firstinspires.ftc.teamcode.biobuzz.calibration;
 
+import com.acmerobotics.dashboard.FtcDashboard;
+import com.acmerobotics.dashboard.telemetry.TelemetryPacket;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.Gamepad;
 import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.util.RobotLog;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -14,42 +17,49 @@ import org.firstinspires.ftc.teamcode.biobuzz.core.BatteryVoltage;
 import org.firstinspires.ftc.teamcode.biobuzz.core.ControlLoop;
 import org.firstinspires.ftc.teamcode.biobuzz.core.Maths;
 import org.firstinspires.ftc.teamcode.biobuzz.shooting.Aiming.FieldTargets;
+import org.firstinspires.ftc.teamcode.biobuzz.shooting.Aiming.ShotSequence;
 import org.firstinspires.ftc.teamcode.biobuzz.shooting.ShotMap;
 import org.firstinspires.ftc.teamcode.biobuzz.shooting.ShotVectorField;
 import org.firstinspires.ftc.teamcode.biobuzz.shooting.ShotVectorField.PointData;
 import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Flywheel;
 import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Intake;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.RearStatusLed;
 import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Turret;
 
 @TeleOp(name = "06 半场射击校准·数据", group = "BIOBUZZ 自测")
 public final class ShotFieldCalibration extends LinearOpMode {
     private static final double TRIGGER_THRESHOLD = 0.10;
-    private static final double SPIN_UP_TIMEOUT = 5.0;
-    private static final double FEED_SECONDS = 0.65;
-    private static final int RPM_STEP = 25;
+    private static final double SPIN_UP_TIMEOUT = 6.0;
+    private static final double RPM_SETTLE_SECONDS = 0.12;
+    private static final double SPINUP_TOLERANCE = 0.035;
     private static final int COMPACT_ROWS_PER_PAGE = 10;
     private static final int COMPACT_LINE_WIDTH = 44;
     private static final int POINTS_PER_ROW = 3;
     private static final int DETAIL_POINTS_PER_PAGE = 3;
-    private enum TrialState { IDLE, SPINNING_UP, FEEDING }
 
     private Turret turret;
     private Flywheel flywheel;
     private Intake intake;
+    private ShotSequence shot;
     private CalibrationStore store;
     private BatteryVoltage battery;
     private Servo pitch;
+    private RearStatusLed lights;
     private boolean rightHalf;
     private double trialVoltage, trialPitch;
-    private double previewAngle = Double.NaN, previewUntil;
+    private double holdTarget = Double.NaN, holdUntil;
+    private boolean previewMove;
     private ShotVectorField field;
     private boolean brake;
     private int column, row;
-    private double targetRpm, maxRpm, deadline;
+    private double targetRpm, maxRpm;
     private List<ShotVectorField.Refinement> refinements;
     private int refinementIndex;
     private double coarseRpm;
-    private TrialState state = TrialState.IDLE;
+
+    private boolean shooting, firedThisPress, cancelWaitRelease, blockerOpen;
+    private double lockedTurretAngle, spinupDeadline, feedSeconds, shotRpmAtRelease = Double.NaN;
+    private double loopHz;
     private ShotVectorField.Vector trial, pending;
     private String status = "选格、摆位、调速后扣 RT";
 
@@ -65,14 +75,17 @@ public final class ShotFieldCalibration extends LinearOpMode {
     @Override public void runOpMode() {
         store = new CalibrationStore(hardwareMap.appContext);
         battery = new BatteryVoltage(hardwareMap);
+        lights = RearStatusLed.open(hardwareMap);
         try (ControlLoop loop = new ControlLoop(hardwareMap)) {
             turret = new Turret(hardwareMap, store, battery);
             flywheel = new Flywheel(hardwareMap, store, battery);
             intake = new Intake(hardwareMap);
+            shot = new ShotSequence(turret, flywheel, intake, true);
             pitch = hardwareMap.tryGet(Servo.class, RobotConfig.PITCH_SERVO);
             if (pitch != null) pitch.setPosition(RobotConfig.ST_HOME);
 
             turret.teachingMode(true);
+            lights.show(RearStatusLed.State.INIT);
             refreshDataView();
             telemetry.setMsTransmissionInterval(150);
 
@@ -80,12 +93,14 @@ public final class ShotFieldCalibration extends LinearOpMode {
             Gamepad initCurrent = new Gamepad();
             initPrevious.copy(gamepad1);
             while (opModeInInit()) {
+                double now = loop.beginFrame();
+                battery.update(now);
                 initCurrent.copy(gamepad1);
                 if (!initCurrent.start) {
                     if (initCurrent.dpad_left) rightHalf = false;
                     if (initCurrent.dpad_right) rightHalf = true;
                 }
-                handleFileShortcuts(initCurrent, initPrevious, Maths.time());
+                handleFileShortcuts(initCurrent, initPrevious, now);
                 Gamepad swap = initPrevious;
                 initPrevious = initCurrent;
                 initCurrent = swap;
@@ -93,6 +108,14 @@ public final class ShotFieldCalibration extends LinearOpMode {
                 telemetry.addLine("方向键左 / 右选半场。将云台轻摆到最右端后按 START。");
                 telemetry.addData("3 × 6", rightHalf ? "右半场（右坐标 3–6 格）" : "左半场（右坐标 0–3 格）");
                 telemetry.addData("射界文件", jsonFilesStatus());
+                if (store.turretStale()) {
+                    telemetry.addLine("云台参数已过期（" + store.turretStaleSummary() + "），建议先重跑对应校准");
+                }
+                if (flywheel.rpmCalibrated()) {
+                    double[] gains = flywheel.pidGains();
+                    telemetry.addData("飞轮 PID", "%s  %.3f / %.3f / %.3f",
+                            flywheel.pidSource(), gains[0], gains[1], gains[2]);
+                }
                 telemetry.addLine("START+X 一键删除 records/model JSON | START后 L3 切数据查看");
                 telemetry.addLine(status);
                 if (!turret.calibrated()) telemetry.addLine("试射前先完成 02 云台行程和正前方向标定。");
@@ -108,87 +131,158 @@ public final class ShotFieldCalibration extends LinearOpMode {
             refreshDataView();
             maxRpm = flywheel.maxTargetRpm();
             targetRpm = Math.min(RobotConfig.FLYWHEEL_TARGET_RPM, maxRpm);
+            lights.show(RearStatusLed.State.CAL_WAIT);
             runCalibration(loop);
         } finally {
             try {
                 stopFeed();
             } finally {
-                if (turret != null) turret.teachingMode(false);
+                if (turret != null) ControlLoop.safeStop("云台", () -> turret.teachingMode(false));
+                if (lights != null) ControlLoop.safeStop("尾灯", lights::stop);
             }
         }
     }
 
     private void runCalibration(ControlLoop loop) {
-        Gamepad previous = new Gamepad();
-        Gamepad current = new Gamepad();
-        previous.copy(gamepad1);
-        double lastTime = Maths.time(), nextDisplay = lastTime;
+        Gamepad prevG1 = new Gamepad(), currG1 = new Gamepad();
+        Gamepad prevG2 = new Gamepad(), currG2 = new Gamepad();
+        prevG1.copy(gamepad1);
+        prevG2.copy(gamepad2);
+        FtcDashboard dashboard = FtcDashboard.getInstance();
+        double lastTime = Maths.time(), nextDisplay = lastTime, nextDashboard = lastTime;
         while (opModeIsActive()) {
             double now = loop.beginFrame();
-            current.copy(gamepad1);
-            double dt = Maths.clip(now - lastTime, 0.005, 0.25);
+            battery.update(now);
+            currG1.copy(gamepad1);
+            currG2.copy(gamepad2);
+            double rawDt = now - lastTime;
+            if (rawDt > 0) loopHz += 0.1 * (1.0 / rawDt - loopHz);
+            double dt = Maths.clip(rawDt, 0.001, 0.25);
             lastTime = now;
+
             turret.sample(dt);
-            flywheel.sample();
             if (isStopRequested()) break;
-            handleControls(current, previous, now);
-            updatePreview(now, dt);
-            updateTrial(now);
+
+            handleControls(currG1, prevG1, currG2, prevG2, now);
+            updateTurretMotion(now, dt);
+            updateShootingLoop(currG1, now, dt);
+            updateLights();
+
+            if (dashboard != null && now >= nextDashboard) {
+                nextDashboard = now + 0.067;
+                try {
+                    publishDashboard(dashboard);
+                } catch (RuntimeException ignored) {
+                    // Dashboard failures must not disturb the calibration loop.
+                }
+            }
             if (now >= nextDisplay) {
                 showCalibration();
                 nextDisplay = now + 0.15;
             }
-            Gamepad swap = previous;
-            previous = current;
-            current = swap;
-            long remaining = loop.remainingMillis(now);
-            if (remaining > 0) sleep(remaining);
+            Gamepad swap1 = prevG1;
+            prevG1 = currG1;
+            currG1 = swap1;
+            Gamepad swap2 = prevG2;
+            prevG2 = currG2;
+            currG2 = swap2;
         }
     }
 
-    private void handleControls(Gamepad current, Gamepad previous, double now) {
-        if (!current.start && current.b && !previous.b) {
-            if (state != TrialState.IDLE) {
-                endTrial("试射已取消");
+    private void handleControls(Gamepad currG1, Gamepad prevG1, Gamepad currG2, Gamepad prevG2, double now) {
+        if (!currG1.start && currG1.b) {
+            if (shooting) {
+                finishShot(false, "试射已取消", now);
+                cancelWaitRelease = currG1.right_trigger > TRIGGER_THRESHOLD;
                 return;
             }
-            if (Double.isFinite(previewAngle)) {
-                endPreview("预瞄已取消");
+            if (turret.softHoming()) {
+                turret.cancelSoftHome();
+                status = "已取消右端寻零";
                 return;
             }
-            if (dataViewMode) {
+            if (Double.isFinite(holdTarget)) {
+                endHoldMove(previewMove ? "预瞄已取消" : "微调已停止");
+                return;
+            }
+            if (!prevG1.b && dataViewMode) {
                 setDataViewMode(false);
                 status = "已返回试射界面";
                 return;
             }
-        } else if (!current.start && current.b) {
-            if (state != TrialState.IDLE) endTrial("试射已取消");
-            if (Double.isFinite(previewAngle)) endPreview("预瞄已取消");
-            return;
         }
-        if (state != TrialState.IDLE || Double.isFinite(previewAngle)) return;
-        if (handleFileShortcuts(current, previous, now)) return;
+        if (shooting) return;
+        if (handleFileShortcuts(currG1, prevG1, now)) return;
 
-        if (current.left_stick_button && !previous.left_stick_button) {
+        if (!currG1.start && currG1.left_stick_button && !prevG1.left_stick_button) {
             setDataViewMode(!dataViewMode);
             status = dataViewMode ? "已进入校准数据查看" : "已返回试射界面";
             return;
         }
 
         if (dataViewMode) {
-            handleDataViewControls(current, previous);
+            handleDataViewControls(currG1, prevG1);
             return;
         }
-        if (current.start) return;
 
-        if (current.back && !previous.back) {
+        // Deputy B: toggle one-button soft right-stop homing (matching TeleOp)
+        if (!currG2.start && currG2.b && !prevG2.b && turret != null) {
+            if (turret.softHoming()) {
+                turret.cancelSoftHome();
+                status = "已取消右端寻零";
+                gamepad2.rumble(60);
+            } else if (turret.calibrated()) {
+                holdTarget = Double.NaN;
+                setBrake(true);
+                if (turret.startSoftHome()) {
+                    status = "正在回右端自动寻零（再按副手 B 取消）";
+                    gamepad2.rumble(80);
+                }
+            }
+            return;
+        }
+        if (turret.softHoming()) return;
+
+        // Deputy RPM fine trim & yaw fine/large nudges (matching TeleOp without drive)
+        double g2RpmStep = 0;
+        if (!currG2.start) {
+            if (currG2.dpad_up && !prevG2.dpad_up) g2RpmStep += RobotConfig.G2_RPM_FINE_STEP;
+            if (currG2.dpad_down && !prevG2.dpad_down) g2RpmStep -= RobotConfig.G2_RPM_FINE_STEP;
+        }
+        if (!currG1.start) {
+            if (currG1.left_bumper && !prevG1.left_bumper) g2RpmStep -= RobotConfig.G2_RPM_FINE_STEP;
+            if (currG1.right_bumper && !prevG1.right_bumper) g2RpmStep += RobotConfig.G2_RPM_FINE_STEP;
+        }
+        if (g2RpmStep != 0) {
+            targetRpm = Maths.clip(targetRpm + g2RpmStep, 0, maxRpm);
+        }
+
+        if (!currG2.start) {
+            double yawDelta = 0;
+            if (currG2.dpad_left && !prevG2.dpad_left) yawDelta += Math.toRadians(RobotConfig.G2_YAW_FINE_DEG);
+            if (currG2.dpad_right && !prevG2.dpad_right) yawDelta -= Math.toRadians(RobotConfig.G2_YAW_FINE_DEG);
+            if (currG2.left_bumper && !prevG2.left_bumper) yawDelta += Math.toRadians(RobotConfig.G2_YAW_LARGE_DEG);
+            if (currG2.right_bumper && !prevG2.right_bumper) yawDelta -= Math.toRadians(RobotConfig.G2_YAW_LARGE_DEG);
+            if (yawDelta != 0) {
+                nudgeTurret(yawDelta, now);
+                return;
+            }
+            if (currG2.a && !prevG2.a) {
+                moveTurretTo(turret.forwardAngle(), now, false, "正在回正前零位");
+                return;
+            }
+        }
+
+        if (currG1.start) return;
+
+        if (currG1.back && !prevG1.back) {
             toggleRefinements();
             return;
         }
-        boolean left = current.dpad_left && !previous.dpad_left;
-        boolean right = current.dpad_right && !previous.dpad_right;
-        boolean down = current.dpad_down && !previous.dpad_down;
-        boolean up = current.dpad_up && !previous.dpad_up;
+        boolean left = currG1.dpad_left && !prevG1.dpad_left;
+        boolean right = currG1.dpad_right && !prevG1.dpad_right;
+        boolean down = currG1.dpad_down && !prevG1.dpad_down;
+        boolean up = currG1.dpad_up && !prevG1.dpad_up;
         if (refinements == null) {
             int nextColumn = move(column, ShotVectorField.COLUMNS, left, right);
             int nextRow = move(row, ShotVectorField.ROWS, down, up);
@@ -203,13 +297,15 @@ public final class ShotFieldCalibration extends LinearOpMode {
             if (next != refinementIndex) selectRefinement(next);
         }
 
-        if (current.x && !previous.x) setBrake(!brake);
-        boolean slower = current.left_bumper && !previous.left_bumper;
-        boolean faster = current.right_bumper && !previous.right_bumper;
-        targetRpm = Maths.clip(targetRpm + (step(faster) - step(slower)) * RPM_STEP, 0, maxRpm);
+        if (currG1.x && !prevG1.x) {
+            holdTarget = Double.NaN;
+            previewMove = false;
+            setBrake(!brake);
+            status = brake ? "云台已刹车锁位" : "云台已松刹车，可手摆微调";
+        }
 
         ShotVectorField.Refinement point = selectedRefinement();
-        if (current.y && !previous.y) {
+        if (currG1.y && !prevG1.y) {
             boolean unreachable = !selectedUnreachable();
             boolean saved = point == null ? field.setUnreachable(column, row, unreachable)
                     : field.setUnreachable(point, unreachable);
@@ -221,7 +317,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
             } else status = "保存不可达状态失败，请重试";
             return;
         }
-        if (current.a && !previous.a) {
+        if (currG1.a && !prevG1.a) {
             if (pending == null) status = "请先在当前点完成一次试射";
             else if (point == null ? field.save(column, row, pending, trialVoltage, trialPitch)
                     : field.save(point, pending, trialVoltage, trialPitch)) {
@@ -231,21 +327,217 @@ public final class ShotFieldCalibration extends LinearOpMode {
             } else status = "保存向量失败，请重试";
             return;
         }
-        if (current.right_stick_button && !previous.right_stick_button) {
+        if (currG1.right_stick_button && !prevG1.right_stick_button) {
             startPreview(point, now);
             return;
         }
-        if (current.right_trigger > TRIGGER_THRESHOLD && previous.right_trigger <= TRIGGER_THRESHOLD) {
-            String blocked = shotBlocker();
-            if (blocked != null) {
-                status = blocked;
-                return;
-            }
-            if (!brake) setBrake(true);
-            pending = null;
-            state = TrialState.SPINNING_UP;
-            deadline = now + SPIN_UP_TIMEOUT;
+
+        boolean triggerPressed = currG1.right_trigger > TRIGGER_THRESHOLD;
+        if (!triggerPressed) {
+            cancelWaitRelease = false;
+            return;
         }
+        if (!cancelWaitRelease && prevG1.right_trigger <= TRIGGER_THRESHOLD) {
+            beginShot(now);
+        }
+    }
+
+    private void nudgeTurret(double deltaRad, double now) {
+        if (!turret.calibrated() || !turret.encoderReady() || !turret.motorResponding()) {
+            status = "云台反馈未就绪";
+            return;
+        }
+        double base = Double.isFinite(holdTarget) ? holdTarget : turret.angle;
+        double desired = Maths.clip(base + deltaRad,
+                RobotConfig.TURRET_MARGIN, turret.span() - RobotConfig.TURRET_MARGIN);
+        String msg = String.format(Locale.ROOT, "微调云台至 %+.1f°（左为正）",
+                Math.toDegrees(Maths.wrap(desired - turret.forwardAngle())));
+        moveTurretTo(desired, now, false, msg);
+    }
+
+    private void moveTurretTo(double targetAngle, double now, boolean preview, String message) {
+        if (!turret.calibrated() || !turret.encoderReady() || !turret.motorResponding()) {
+            status = "云台反馈未就绪";
+            return;
+        }
+        setBrake(true);
+        holdTarget = Maths.clip(targetAngle, RobotConfig.TURRET_MARGIN, turret.span() - RobotConfig.TURRET_MARGIN);
+        holdUntil = now + (preview ? 3.5 : 2.5);
+        previewMove = preview;
+        pending = null;
+        status = message;
+    }
+
+    private void updateTurretMotion(double now, double dt) {
+        if (shooting) return;
+        if (turret.softHoming()) {
+            Turret.SoftHomeResult result = turret.updateSoftHome(dt);
+            if (result == Turret.SoftHomeResult.SUCCEEDED) {
+                status = "云台右端寻零完成（按 X 松刹车可手摆）";
+                gamepad2.rumble(150);
+                gamepad1.rumble(100);
+            } else if (result == Turret.SoftHomeResult.FAILED) {
+                status = "右端寻零失败，请检查编码器或手动摆零";
+                gamepad2.rumble(0.5, 0.5, 250);
+            }
+            return;
+        }
+        if (!Double.isFinite(holdTarget)) return;
+        if (now >= holdUntil || !turret.encoderReady() || !turret.motorResponding()) {
+            endHoldMove(previewMove ? "预瞄未到位，可手动微调" : "微调超时，可按 X 手调");
+        } else if (Math.abs(turret.angle - holdTarget) <= Math.toRadians(0.9) && turret.stableForShot()) {
+            endHoldMove(previewMove ? "预瞄完成，按 X 松刹车微调" : "云台微调到位");
+        } else {
+            turret.control(holdTarget, 0, dt);
+        }
+    }
+
+    private void endHoldMove(String message) {
+        turret.stop();
+        holdTarget = Double.NaN;
+        previewMove = false;
+        status = message;
+    }
+
+    private void beginShot(double now) {
+        String blocked = shotBlocker();
+        if (blocked != null) {
+            status = blocked;
+            cancelWaitRelease = true;
+            return;
+        }
+        if (turret.softHoming()) turret.cancelSoftHome();
+        holdTarget = Double.NaN;
+        previewMove = false;
+        setBrake(true);
+        if (!brake) {
+            status = "云台刹车上锁失败，检查电机";
+            cancelWaitRelease = true;
+            return;
+        }
+        lockedTurretAngle = turret.angle;
+        shot.releaseTrigger();
+        pending = null;
+        trial = null;
+        shooting = true;
+        firedThisPress = false;
+        feedSeconds = 0;
+        shotRpmAtRelease = Double.NaN;
+        spinupDeadline = now + SPIN_UP_TIMEOUT;
+        status = "已锁云台刹车，等待飞轮从零达速稳态";
+        RobotLog.ii("BioBuzzShot", "06 RT pressed: targetRpm=%.0f turret=%+.2f deg",
+                targetRpm, Math.toDegrees(turret.boreRelative()));
+    }
+
+    private void updateShootingLoop(Gamepad currG1, double now, double dt) {
+        boolean triggerPressed = !dataViewMode && !currG1.start && currG1.right_trigger > TRIGGER_THRESHOLD;
+        if (!shooting) {
+            shot.update(false, false, false, false, false, targetRpm, true, true, true,
+                    RPM_SETTLE_SECONDS, true, SPINUP_TOLERANCE);
+            flywheel.feed(false);
+            intake.set(false, false, false);
+            blockerOpen = false;
+            return;
+        }
+        if (!triggerPressed) {
+            finishShot(firedThisPress, firedThisPress ? null : "已松开 RT 取消试射", now);
+            return;
+        }
+        String blocked = shotBlocker();
+        if (blocked != null) {
+            finishShot(false, blocked, now);
+            cancelWaitRelease = true;
+            return;
+        }
+
+        // Actively brake & hold turret at the aimed angle while spinning up and feeding
+        turret.control(lockedTurretAngle, 0, dt);
+
+        boolean releaseShot = shot.update(true, false, false, false, false, targetRpm, true, true, true,
+                RPM_SETTLE_SECONDS, true, SPINUP_TOLERANCE);
+        boolean firing = flywheel.feed(releaseShot);
+        intake.set(false, firing, false);
+        if (blockerOpen != firing) {
+            RobotLog.ii("BioBuzzShot", "06 SB %s (rpm=%.0f target=%.0f turret=%+.2f deg)",
+                    firing ? "opened" : "closed", flywheel.rpm(), targetRpm,
+                    Math.toDegrees(turret.boreRelative()));
+            blockerOpen = firing;
+        }
+
+        if (firing) {
+            if (!firedThisPress) {
+                firedThisPress = true;
+                shotRpmAtRelease = flywheel.rpm();
+                trial = ShotVectorField.Vector.fromShot(turret.boreRelative(), targetRpm);
+                trialVoltage = battery.measured() ? battery.volts() : -1;
+                trialPitch = pitch != null ? pitch.getPosition() : -1;
+                gamepad1.rumble(120);
+            }
+            feedSeconds += dt;
+        }
+
+        if (Math.abs(turret.angle - lockedTurretAngle) > RobotConfig.SHOT_AIM_TOLERANCE) {
+            finishShot(false, "云台偏移过大，已中止供弹", now);
+            cancelWaitRelease = true;
+        } else if (!firedThisPress && now >= spinupDeadline) {
+            finishShot(false, "等待云台停稳或飞轮从零达速超时，请再试", now);
+            cancelWaitRelease = true;
+        }
+    }
+
+    private void finishShot(boolean keepTrial, String customMessage, double now) {
+        if (keepTrial && trial != null) {
+            pending = trial;
+            status = String.format(Locale.ROOT, "供弹 %.2fs（放行 %.0f/%.0f RPM），命中按 A 保存",
+                    feedSeconds, shotRpmAtRelease, targetRpm);
+        } else {
+            status = customMessage != null ? customMessage : "试射结束";
+        }
+        shot.releaseTrigger();
+        stopFeed();
+        if (turret != null && brake) turret.stop();
+        blockerOpen = false;
+        shooting = false;
+        firedThisPress = false;
+        trial = null;
+        if (keepTrial) RobotLog.ii("BioBuzzShot", "06 RT released: feedSeconds=%.2f", feedSeconds);
+    }
+
+    private void updateLights() {
+        if (lights == null) return;
+        if (shooting) {
+            lights.show(blockerOpen ? RearStatusLed.State.AIMED_LOCKED : RearStatusLed.State.CAL_RUNNING);
+            return;
+        }
+        boolean fault = !turret.calibrated() || !turret.isHomed() || !turret.encoderReady()
+                || !turret.motorResponding() || !flywheel.rpmCalibrated() || flywheel.faulted() || !flywheel.hasBlocker();
+        if (fault) lights.update(RearStatusLed.State.FAULT);
+        else lights.update(brake ? RearStatusLed.State.CAL_WAIT : RearStatusLed.State.DRIVE);
+    }
+
+    private void publishDashboard(FtcDashboard dashboard) {
+        TelemetryPacket packet = new TelemetryPacket();
+        packet.put("loop_hz", loopHz);
+        packet.put("battery_V", battery.volts());
+        packet.put("feeding", blockerOpen ? 1 : 0);
+        packet.put("rpm_lock", 1);
+        if (turret != null) {
+            packet.put("turret_angle_deg", Math.toDegrees(turret.angle));
+            packet.put("turret_target_deg", Math.toDegrees(Double.isFinite(holdTarget) ? holdTarget
+                    : shooting ? lockedTurretAngle : turret.angle));
+            packet.put("turret_rate_deg_s", Math.toDegrees(turret.speed));
+            packet.put("turret_voltage", turret.output() * BatteryVoltage.NOMINAL_VOLTS);
+            packet.put("turret_duty", turret.actualDuty());
+            packet.put("turret_brake_voltage", turret.brakeDuty() * BatteryVoltage.NOMINAL_VOLTS);
+            packet.put("turret_observer_bias", turret.observerBias());
+        }
+        if (flywheel != null && flywheel.rpmCalibrated()) {
+            packet.put("flywheel_rpm", flywheel.rpm());
+            packet.put("flywheel_target_rpm", flywheel.target * 60 / flywheel.ticksPerRev);
+            packet.put("flywheel_voltage", flywheel.deliveredVolts());
+            packet.put("flywheel_pid_integral_voltage", flywheel.integralVolts());
+        }
+        dashboard.sendTelemetryPacket(packet);
     }
 
     private boolean handleFileShortcuts(Gamepad current, Gamepad previous, double now) {
@@ -359,29 +651,12 @@ public final class ShotFieldCalibration extends LinearOpMode {
         ShotVectorField.Vector guess = model.preview(x, y);
         double bearing = guess != null ? guess.bearing()
                 : FieldTargets.fromPose(y * RobotConfig.TILE_MM, -x * RobotConfig.TILE_MM, 0).bearing;
-        previewAngle = turret.previewAngle(bearing);
-        if (!Double.isFinite(previewAngle)) {
+        double angle = turret.previewAngle(bearing);
+        if (!Double.isFinite(angle)) {
             status = "预瞄目标超出云台安全行程";
             return;
         }
-        setBrake(true);
-        previewUntil = now + 3.5;
-        status = "云台预瞄中，B 取消";
-    }
-
-    private void updatePreview(double now, double dt) {
-        if (!Double.isFinite(previewAngle)) return;
-        if (now >= previewUntil || !turret.encoderReady() || !turret.motorResponding()) {
-            endPreview("预瞄未到位，可手动微调");
-        } else if (Math.abs(turret.angle - previewAngle) <= Math.toRadians(1.5) && turret.stableForShot()) {
-            endPreview("预瞄完成，按 X 松刹车微调");
-        } else turret.control(previewAngle, 0, dt);
-    }
-
-    private void endPreview(String message) {
-        turret.stop();
-        previewAngle = Double.NaN;
-        status = message;
+        moveTurretTo(angle, now, true, "云台预瞄中，B 取消");
     }
 
     private void toggleRefinements() {
@@ -417,9 +692,9 @@ public final class ShotFieldCalibration extends LinearOpMode {
         refinementIndex = index;
         pending = null;
         ShotVectorField.Refinement point = selectedRefinement();
-        ShotVectorField.Vector shot = field.at(point);
-        if (shot == null) shot = field.at(point.column, point.row);
-        targetRpm = Math.min(shot.rpm(), maxRpm);
+        ShotVectorField.Vector shotVec = field.at(point);
+        if (shotVec == null) shotVec = field.at(point.column, point.row);
+        targetRpm = Math.min(shotVec.rpm(), maxRpm);
         status = "照摆车提示对齐两条地垫缝";
     }
 
@@ -430,40 +705,6 @@ public final class ShotFieldCalibration extends LinearOpMode {
     private boolean selectedUnreachable() {
         ShotVectorField.Refinement point = selectedRefinement();
         return point == null ? field.isUnreachable(column, row) : field.isUnreachable(point);
-    }
-
-    private void updateTrial(double now) {
-        if (state == TrialState.IDLE) return;
-        String blocked = shotBlocker();
-        if (blocked != null) {
-            endTrial(blocked);
-            return;
-        }
-        flywheel.requestRpm(targetRpm);
-        if (state == TrialState.SPINNING_UP) {
-            if (now >= deadline) {
-                endTrial("等待云台停稳或飞轮到速超时，请再试");
-                return;
-            }
-            if (!turret.stableForShot() || !flywheel.readyForShot() || !intake.readyToFeed()) return;
-            trial = ShotVectorField.Vector.fromShot(turret.boreRelative(), targetRpm);
-            trialVoltage = battery.measured() ? battery.volts() : -1;
-            trialPitch = pitch != null ? pitch.getPosition() : -1;
-            state = TrialState.FEEDING;
-            deadline = now + FEED_SECONDS;
-        }
-
-        double aimChange = Maths.wrap(turret.boreRelative() - trial.bearing());
-        if (!turret.stableForShot() || Math.abs(aimChange) > RobotConfig.SHOT_AIM_TOLERANCE) {
-            endTrial("云台移动，已中止供弹");
-        } else if (now >= deadline) {
-            pending = trial;
-            endTrial("供弹结束，确认命中后按 A 保存");
-        } else if (flywheel.feed(true)) {
-            intake.set(false, true, false);
-        } else {
-            endTrial("供弹未放行");
-        }
     }
 
     private String shotBlocker() {
@@ -483,13 +724,6 @@ public final class ShotFieldCalibration extends LinearOpMode {
     private void setBrake(boolean engaged) {
         turret.teachingMode(!engaged);
         brake = engaged && turret.motorResponding();
-    }
-
-    private void endTrial(String result) {
-        stopFeed();
-        state = TrialState.IDLE;
-        trial = null;
-        status = result;
     }
 
     private void stopFeed() {
@@ -516,21 +750,34 @@ public final class ShotFieldCalibration extends LinearOpMode {
             telemetry.addData("摆车", "车身%s角对地垫%s角", point.corner.label, point.corner.label);
             telemetry.addLine("车头朝场地正前，车身两条边沿着接缝，整车放在这块地垫内。");
         }
-        telemetry.addData("云台", "%s · %s", turret.motorResponding() ? (brake ? "刹车" : "可手摆") : "电机不可用",
+        telemetry.addData("云台", "%s · %s",
+                turret.motorResponding() ? (turret.softHoming() ? "回零中" : brake ? "刹车" : "可手摆") : "电机不可用",
                 turret.encoderReady() ? String.format("%+.1f°（左为正）", Math.toDegrees(turret.boreRelative())) : "角度不可用");
         if (flywheel.rpmCalibrated()) {
-            telemetry.addData("飞轮 实际 / 目标 / 上限", "%.0f / %.0f / %.0f RPM",
-                    flywheel.speed * 60 / flywheel.ticksPerRev, targetRpm, maxRpm);
+            double[] gains = flywheel.pidGains();
+            telemetry.addData("飞轮 实际 / 设定 / 上限", "%.0f / %.0f / %.0f RPM（平时停转，按RT起转）",
+                    flywheel.rpm(), targetRpm, maxRpm);
+            telemetry.addData("飞轮 PID", "%s %.3f/%.3f/%.3f | %.0f Hz",
+                    flywheel.pidSource(), gains[0], gains[1], gains[2], loopHz);
         }
-        telemetry.addData("试射", state == TrialState.IDLE ? status
-                : state == TrialState.SPINNING_UP ? "等待云台停稳和飞轮到速" : "正在单次供弹");
+        String shotLine = status;
+        if (shooting) {
+            if (blockerOpen) {
+                shotLine = String.format(Locale.ROOT, "正在供弹 %.2fs（放行 %.0f RPM），松开 RT 结束",
+                        feedSeconds, shotRpmAtRelease);
+            } else {
+                String waiting = shot.waitingStatus();
+                shotLine = waiting != null ? waiting : "正在从零起转飞轮，等待稳态";
+            }
+        }
+        telemetry.addData("试射", shotLine);
         telemetry.addData("射界文件", jsonFilesStatus());
         showVector("待保存", pending);
         showVector("当前点已保存", point == null ? field.at(column, row) : field.at(point));
         if (point == null) showGrid();
         telemetry.addLine(point == null ? "方向键选格 | Back 四角精测 | L3 查看数据" : "方向键左/右换角 | Back 回格心 | L3 查看数据");
-        telemetry.addLine("LB/RB −/+" + RPM_STEP + " RPM | X 刹车/松开 | R3 预瞄");
-        telemetry.addLine("RT 单次试射 | A 保存试射 | Y 不可达/恢复 | B 取消试射");
+        telemetry.addLine("LB/RB −/+25 | X 刹车/松开 | R3 预瞄 | 副手 上下±25RPM 左右±0.5° LB/RB±5° A回前 B寻零");
+        telemetry.addLine("按住 RT 锁台从零达速射（松手停转）| A 保存 | Y 不可达 | B 取消");
         telemetry.addLine("START+X 删records/model JSON | START+Y 清旧v1 | START+Back 全清");
         telemetry.update();
     }

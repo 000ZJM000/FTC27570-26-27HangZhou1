@@ -42,15 +42,27 @@ import java.io.IOException;
 import java.util.function.Supplier;
 
 @Autonomous(name = "BIOBUZZ Pedro 吸两组设三组2T", group = "BIOBUZZ")
-public final class BioBuzzPedroAuto extends LinearOpMode {
+public class BioBuzzPedroAuto extends LinearOpMode {
+    enum AutoMode { TWO_GROUP_9_LEG, WAIT_SHOOT_PARK }
+
     private static final double PINPOINT_PAUSE_SECONDS = 0.25;
     private static final long TIMEOUT_BRAKE_MS = 100;
-    private static final long FRONT_LOWER_SETTLE_MS = 180;
+    private static final long FINAL_SHOOT_WINDOW_MS = 2000L;
 
     private enum LegResult { REACHED, TIMED_OUT, STOPPED }
 
+    private final AutoMode autoMode;
+
+    public BioBuzzPedroAuto() {
+        this(AutoMode.TWO_GROUP_9_LEG);
+    }
+
+    protected BioBuzzPedroAuto(AutoMode autoMode) {
+        this.autoMode = autoMode;
+    }
+
     @Override public void runOpMode() throws InterruptedException {
-        RobotStateStorage.clear();
+        RobotStateStorage.clearAutoPose();
         BatteryVoltage battery = new BatteryVoltage(hardwareMap);
         PinpointPose pinpoint = new PinpointPose(hardwareMap, battery);
         PedroDrive mecanum = null;
@@ -58,8 +70,14 @@ public final class BioBuzzPedroAuto extends LinearOpMode {
         String status;
         try (ControlLoop loop = new ControlLoop(hardwareMap)) {
             mechanisms = new Mechanisms(hardwareMap, telemetry, battery, pinpoint);
-            PedroRoute route = PedroRoute.load(hardwareMap.appContext.getAssets());
-            if (route.legs.size() != 8) throw new JSONException("机构流程需要 8 段 PP 路径");
+            PedroRoute route = PedroRoute.load(hardwareMap.appContext.getAssets(),
+                    autoMode == AutoMode.WAIT_SHOOT_PARK ? PedroRoute.WAIT_SHOOT_PARK_ASSET : PedroRoute.ASSET);
+            if (autoMode == AutoMode.TWO_GROUP_9_LEG && route.legs.size() != 9) {
+                throw new JSONException("机构流程需要 9 段 PP 路径");
+            }
+            if (autoMode == AutoMode.WAIT_SHOOT_PARK && route.legs.size() < 2) {
+                throw new JSONException("等待打预制 Park 流程至少需要 2 段 PP 路径");
+            }
             mecanum = new PedroDrive(hardwareMap);
             mecanum.stop(true);
             PedroPinpointLocalizer localizer = new PedroPinpointLocalizer(pinpoint);
@@ -79,10 +97,17 @@ public final class BioBuzzPedroAuto extends LinearOpMode {
                 localizer.sample();
                 if (!initAnchored) initAnchored = PedroPinpointLocalizer.anchorRouteStart(pinpoint, route.start);
                 telemetry.addData("Pinpoint", pinpoint.status);
+                telemetry.addData("Hub IMU 备援", pinpoint.hubImuSummary());
                 telemetry.addData("FR / FL", mechanisms.frontStatus());
                 telemetry.addData("射击数据", mechanisms.shotMapStatus());
                 telemetry.addData("起点 X / Y / 车头", "%.2f / %.2f in / %.0f°",
                         route.start.x(), route.start.y(), Math.toDegrees(route.start.heading()));
+                if (autoMode == AutoMode.WAIT_SHOOT_PARK) {
+                    long totalWaitMs = Math.max(0L, route.legs.get(0).waitBefore + route.legs.get(0).waitAfter);
+                    long preWaitMs = Math.max(0L, totalWaitMs - FINAL_SHOOT_WINDOW_MS);
+                    telemetry.addData("等待 / 射击", "总等待 %.1f s（静候 %.1f s + 最后 %.1f s 射球后 Park）",
+                            totalWaitMs / 1000.0, preWaitMs / 1000.0, FINAL_SHOOT_WINDOW_MS / 1000.0);
+                }
                 telemetry.addData("第 1 段末端车头", "%.0f°", Math.toDegrees(firstEnd.heading()));
                 telemetry.addData("终点 X / Y / 车头", "%.2f / %.2f in / %.0f°",
                         end.x(), end.y(), Math.toDegrees(end.heading()));
@@ -105,42 +130,10 @@ public final class BioBuzzPedroAuto extends LinearOpMode {
             }
             mechanisms.start();
             recordState(pinpoint, mechanisms);
-            int timedOut = 0;
-            boolean rejoin = false;
-            for (int index = 0; index < route.legs.size(); index++) {
-                PedroRoute.Leg leg = route.legs.get(index);
-                int number = index + 1;
-                if (!waitAtStop(leg.waitBefore, localizer, loop, pinpoint, mechanisms)) return;
-                if (number == 2 || number == 5) mechanisms.collect(true);
-                String name = String.format("%d/%d %s", number, route.legs.size(), leg.name);
-                LegResult result = followLeg(follower, mecanum, pinpoint, leg, name, rejoin, number == 8, loop, mechanisms);
-                if (result == LegResult.STOPPED) return;
-                if (number == 7) mechanisms.collect(false);
-                if (number == 8) mechanisms.lowerFront(false);
-                rejoin = result == LegResult.TIMED_OUT;
-                if (rejoin) {
-                    timedOut++;
-                    Pose target = leg.path.endPose();
-                    Pose measured = follower.pose();
-                    telemetry.log().add("%s 未到位，持续低速，超时跳过底盘。偏差 %.2f in / %.1f°", name,
-                            measured.distance(target), Math.toDegrees(Maths.wrap(target.heading() - measured.heading())));
-                    telemetry.update();
-                    if (!waitAtStop(TIMEOUT_BRAKE_MS, localizer, loop, pinpoint, mechanisms)) return;
-                }
-                if (number == 1 || number == 3 || number == 7) {
-                    if (!shootAtStop(leg.waitAfter, name, localizer, loop, pinpoint, mechanisms)) return;
-                } else if (number == 2 || result == LegResult.REACHED) {
-                    long waitMs = leg.waitAfter;
-                    if (number == 4) {
-                        mechanisms.lowerFront(true);
-                        waitMs = Math.max(waitMs, FRONT_LOWER_SETTLE_MS);
-                    }
-                    if (!waitAtStop(waitMs, localizer, loop, pinpoint, mechanisms)) return;
-                }
-                if (number == 2) mechanisms.collect(false);
-                if (number == 7) mechanisms.stopShooting();
-            }
-            status = timedOut == 0 ? "路径完成" : String.format("路线执行结束，超时跳过 %d 段", timedOut);
+            status = autoMode == AutoMode.WAIT_SHOOT_PARK
+                    ? runWaitShootPark(route, follower, mecanum, localizer, loop, pinpoint, mechanisms)
+                    : runTwoGroupNineLeg(route, follower, mecanum, localizer, loop, pinpoint, mechanisms);
+            if (status == null) return;
         } catch (IOException | JSONException | RuntimeException failure) {
             status = "自动停止：" + failure.getMessage();
         } finally {
@@ -159,6 +152,9 @@ public final class BioBuzzPedroAuto extends LinearOpMode {
                         Math.toDegrees(pinpoint.heading));
             }
             telemetry.addData("Pinpoint", pinpoint.status);
+            if (pinpoint.usingHubImu || pinpoint.hubFallbackEvents > 0 || pinpoint.hubImuMismatch()) {
+                telemetry.addData("Hub IMU 备援", pinpoint.hubImuSummary());
+            }
             telemetry.addData("自动接续", RobotStateStorage.hasAutoPose() && RobotStateStorage.hasTurretHome()
                     ? "已保存位姿与云台零位，可直接进手动" : "接续数据不完整");
             telemetry.addLine(status);
@@ -167,18 +163,170 @@ public final class BioBuzzPedroAuto extends LinearOpMode {
         }
     }
 
+    private String runTwoGroupNineLeg(PedroRoute route, Follower follower, PedroDrive mecanum,
+                                      PedroPinpointLocalizer localizer, ControlLoop loop,
+                                      PinpointPose pinpoint, Mechanisms mechanisms) throws InterruptedException {
+        int timedOut = 0;
+        boolean rejoin = false;
+        for (int index = 0; index < route.legs.size(); index++) {
+            PedroRoute.Leg leg = route.legs.get(index);
+            int number = index + 1;
+            if (number == 2 || number == 6) mechanisms.collect(true);
+            if (number == 6) mechanisms.forceLowerFront(true);
+            if (!waitAtStop(leg.waitBefore, localizer, loop, pinpoint, mechanisms)) return null;
+            String name = String.format("%d/%d %s", number, route.legs.size(), leg.name);
+            LegResult result = followLeg(follower, mecanum, pinpoint, leg, name, rejoin, number == 9, loop, mechanisms);
+            if (result == LegResult.STOPPED) return null;
+            if (number == 5) mechanisms.forceLowerFront(true);
+            if (number == 7 || number == 9) mechanisms.forceLowerFront(false);
+            if (number == 8) mechanisms.collect(false);
+            boolean hasPush = number == 6;
+            rejoin = result == LegResult.TIMED_OUT;
+            if (rejoin) {
+                timedOut++;
+                Pose target = leg.path.endPose();
+                Pose measured = follower.pose();
+                telemetry.log().add("%s 未到位，持续低速，超时跳过底盘。偏差 %.2f in / %.1f°", name,
+                        measured.distance(target), Math.toDegrees(Maths.wrap(target.heading() - measured.heading())));
+                telemetry.update();
+                if (!hasPush && !waitAtStop(TIMEOUT_BRAKE_MS, localizer, loop, pinpoint, mechanisms)) return null;
+            }
+            if (hasPush) {
+                mechanisms.collect(true);
+                int cycles = Math.max(0, RobotConfig.AUTO_LEG6_BUMP_CYCLES);
+                for (int cycle = 1; cycle <= cycles; cycle++) {
+                    String cycleLabel = String.format("%s (%d/%d)", name, cycle, cycles);
+                    if (!driveForwardOpenLoop(RobotConfig.AUTO_LEG6_BACK_SECONDS,
+                            -Math.abs(RobotConfig.AUTO_LEG6_BUMP_POWER),
+                            cycleLabel, mecanum, localizer, loop, pinpoint, mechanisms)) return null;
+                    if (!driveForwardOpenLoop(RobotConfig.AUTO_LEG6_PUSH_SECONDS,
+                            Math.abs(RobotConfig.AUTO_LEG6_BUMP_POWER),
+                            cycleLabel, mecanum, localizer, loop, pinpoint, mechanisms)) return null;
+                }
+                rejoin = true;
+            }
+            if (number == 1 || number == 4 || number == 8) {
+                if (number == 4) {
+                    long delayMs = Math.round(Math.max(0.0, RobotConfig.AUTO_LEG4_SHOOT_DELAY_SECONDS) * 1000.0);
+                    if (delayMs > 0 && !waitAtStop(delayMs, localizer, loop, pinpoint, mechanisms)) return null;
+                }
+                if (!shootAtStop(leg.waitAfter, name, localizer, loop, pinpoint, mechanisms)) return null;
+            } else if (number == 2 || number == 5 || result == LegResult.REACHED || hasPush) {
+                long waitMs = leg.waitAfter;
+                if (number == 5) {
+                    mechanisms.forceLowerFront(true);
+                    long lowerSettleMs = Math.round(Math.max(0.0, RobotConfig.AUTO_FRONT_LOWER_SETTLE_SECONDS) * 1000.0);
+                    waitMs = Math.max(waitMs, lowerSettleMs);
+                    telemetry.log().add("路径 5 结束：放下 FR/FL（%s）", mechanisms.frontStatus());
+                    telemetry.update();
+                }
+                if (waitMs > 0 && !waitAtStop(waitMs, localizer, loop, pinpoint, mechanisms)) return null;
+            }
+            if (number == 2) mechanisms.collect(false);
+            if (number == 8) mechanisms.stopShooting();
+        }
+        return timedOut == 0 ? "路径完成" : String.format("路线执行结束，超时跳过 %d 段", timedOut);
+    }
+
+    private String runWaitShootPark(PedroRoute route, Follower follower, PedroDrive mecanum,
+                                    PedroPinpointLocalizer localizer, ControlLoop loop,
+                                    PinpointPose pinpoint, Mechanisms mechanisms) throws InterruptedException {
+        int timedOut = 0;
+        PedroRoute.Leg firstLeg = route.legs.get(0);
+        String firstName = String.format("1/%d %s", route.legs.size(), firstLeg.name);
+        LegResult firstResult = followLeg(follower, mecanum, pinpoint, firstLeg, firstName, false, false, loop, mechanisms);
+        if (firstResult == LegResult.STOPPED) return null;
+        boolean rejoin = firstResult == LegResult.TIMED_OUT;
+        if (rejoin) {
+            timedOut++;
+            Pose target = firstLeg.path.endPose();
+            Pose measured = follower.pose();
+            telemetry.log().add("%s 未到位，持续低速，超时跳过底盘。偏差 %.2f in / %.1f°", firstName,
+                    measured.distance(target), Math.toDegrees(Maths.wrap(target.heading() - measured.heading())));
+            telemetry.update();
+        }
+        long totalWaitMs = Math.max(0L, firstLeg.waitBefore + firstLeg.waitAfter);
+        long preWaitMs = Math.max(0L, totalWaitMs - FINAL_SHOOT_WINDOW_MS);
+        if (!waitAtStop(preWaitMs, "等待发射倒计时", localizer, loop, pinpoint, mechanisms)) return null;
+        if (!shootAtStop(FINAL_SHOOT_WINDOW_MS, "最后 2s 射出预制球", localizer, loop, pinpoint, mechanisms)) return null;
+        mechanisms.stopShooting();
+
+        for (int index = 1; index < route.legs.size(); index++) {
+            PedroRoute.Leg leg = route.legs.get(index);
+            int number = index + 1;
+            if (!waitAtStop(leg.waitBefore, localizer, loop, pinpoint, mechanisms)) return null;
+            String name = String.format("%d/%d %s", number, route.legs.size(), leg.name);
+            boolean park = index == route.legs.size() - 1;
+            LegResult result = followLeg(follower, mecanum, pinpoint, leg, name, rejoin, park, loop, mechanisms);
+            if (result == LegResult.STOPPED) return null;
+            rejoin = result == LegResult.TIMED_OUT;
+            if (rejoin) {
+                timedOut++;
+                Pose target = leg.path.endPose();
+                Pose measured = follower.pose();
+                telemetry.log().add("%s 未到位，持续低速，超时跳过底盘。偏差 %.2f in / %.1f°", name,
+                        measured.distance(target), Math.toDegrees(Maths.wrap(target.heading() - measured.heading())));
+                telemetry.update();
+            }
+            if (leg.waitAfter > 0 && !waitAtStop(leg.waitAfter, localizer, loop, pinpoint, mechanisms)) return null;
+        }
+        return timedOut == 0 ? "路径完成" : String.format("路线执行结束，超时跳过 %d 段", timedOut);
+    }
+
     private static void recordState(PinpointPose pinpoint, Mechanisms mechanisms) {
         if (pinpoint != null && pinpoint.hasPositionAnchor()) {
             RobotStateStorage.recordAutoPose(pinpoint.forward, pinpoint.left, pinpoint.heading);
         }
         if (mechanisms != null && mechanisms.hasTurretHome()) {
             RobotStateStorage.recordTurretHome(mechanisms.turretHomeTick());
+            RobotStateStorage.recordTurretSample(mechanisms.turretLastTick(), mechanisms.turretAngle());
         }
     }
 
     private boolean waitAtStop(long millis, PedroPinpointLocalizer localizer, ControlLoop loop,
                                PinpointPose pinpoint, Mechanisms mechanisms) throws InterruptedException {
-        return holdAtStop(millis, null, null, localizer, loop, pinpoint, mechanisms);
+        return waitAtStop(millis, null, localizer, loop, pinpoint, mechanisms);
+    }
+
+    private boolean waitAtStop(long millis, String label, PedroPinpointLocalizer localizer, ControlLoop loop,
+                               PinpointPose pinpoint, Mechanisms mechanisms) throws InterruptedException {
+        if (millis <= 0) return opModeIsActive();
+        return holdAtStop(millis, label, null, localizer, loop, pinpoint, mechanisms);
+    }
+
+    private boolean driveForwardOpenLoop(double seconds, double power, String name, PedroDrive drive,
+                                         PedroPinpointLocalizer localizer, ControlLoop loop,
+                                         PinpointPose pinpoint, Mechanisms mechanisms) {
+        if (seconds <= 0) return opModeIsActive();
+        double clampedPower = Maths.clip(power, -1.0, 1.0);
+        double started = Maths.time();
+        double until = started + seconds;
+        double nextDisplay = started;
+        DrivePowers forward = new DrivePowers(clampedPower, 0, 0);
+        try {
+            while (opModeIsActive()) {
+                double frame = loop.beginFrame();
+                if (frame >= until) break;
+                localizer.sample();
+                recordState(pinpoint, mechanisms);
+                if (isStopRequested()) return false;
+                drive.applyDrive(forward);
+                mechanisms.update(frame, false, 0, false);
+                if (frame >= nextDisplay) {
+                    nextDisplay = frame + 0.12;
+                    telemetry.addData(clampedPower < 0 ? "开环回退吸取" : "开环前进吸取",
+                            "%s (%.2f / %.2f s, power %.2f)",
+                            name, frame - started, seconds, clampedPower);
+                    telemetry.addData("Pinpoint 右 / 前 / 车头", "%.2f / %.2f 格 / %+.1f°",
+                            -pinpoint.left / RobotConfig.TILE_MM, pinpoint.forward / RobotConfig.TILE_MM,
+                            Math.toDegrees(pinpoint.heading));
+                    telemetry.update();
+                }
+            }
+            return opModeIsActive();
+        } finally {
+            drive.stop(true);
+        }
     }
 
     private boolean shootAtStop(long millis, String name, PedroPinpointLocalizer localizer,
@@ -200,7 +348,8 @@ public final class BioBuzzPedroAuto extends LinearOpMode {
                                PedroPinpointLocalizer localizer, ControlLoop loop,
                                PinpointPose pinpoint, Mechanisms mechanisms) throws InterruptedException {
         double started = Maths.time();
-        double until = started + millis / 1000.0;
+        double totalSec = millis / 1000.0;
+        double until = started + totalSec;
         double nextDisplay = started;
         while (opModeIsActive()) {
             double frame = loop.beginFrame();
@@ -217,6 +366,12 @@ public final class BioBuzzPedroAuto extends LinearOpMode {
                     mechanisms.showVolley(name, volley);
                     telemetry.update();
                 }
+            } else if (name != null && frame >= nextDisplay) {
+                nextDisplay = frame + 0.12;
+                double remaining = Math.max(0.0, until - frame);
+                telemetry.addData(name, "剩余 %.1f / %.1f 秒", remaining, totalSec);
+                mechanisms.showStandby();
+                telemetry.update();
             }
         }
         return opModeIsActive();
@@ -363,7 +518,14 @@ public final class BioBuzzPedroAuto extends LinearOpMode {
             c.naturalForwardDeceleration.set(forwardDecel);
             c.naturalStrafeDeceleration.set(strafeDecel);
             c.maxPathSpeed.set(1.0);
-            c.maxDecelerationConstraint.set(RobotConfig.PEDRO_MAX_DECEL);
+            c.maxDecelerationConstraint.set(RobotConfig.PEDRO_MAX_DECEL > 0
+                    ? RobotConfig.PEDRO_MAX_DECEL : ForesightConfig.Constraint.NONE);
+            c.maxBrakingPower.set(Maths.clip(RobotConfig.PEDRO_MAX_BRAKE_POWER, 0.10, 1.0));
+            c.headingDeviationTolerance.set(Math.toRadians(Math.max(5.0, RobotConfig.PEDRO_HEADING_DEV_TOL_DEG)));
+            c.translationalDeviationTolerance.set(Math.max(1.0, RobotConfig.PEDRO_TRANS_DEV_TOL_IN));
+            c.holdPointTranslationalScaling.set(Maths.clip(RobotConfig.PEDRO_HOLD_TRANS_SCALE, 0.15, 1.0));
+            c.holdPointHeadingScaling.set(Maths.clip(RobotConfig.PEDRO_HOLD_HEADING_SCALE, 0.15, 1.0));
+            c.headingDriveRatio.set(Maths.clip(RobotConfig.PEDRO_HEADING_DRIVE_RATIO, 0.10, 0.90));
             c.pathSkip.set(false);
         });
     }
@@ -379,7 +541,7 @@ public final class BioBuzzPedroAuto extends LinearOpMode {
         private final ShotSequence shot;
         private final double maxRpm;
         private boolean armed, collecting, feeding;
-        private double lastUpdate;
+        private double lastUpdate, startedAt = Double.NaN;
         private CornerAim aim;
         private FieldTargets fallbackAim;
         private String shotStatus = "等待 START";
@@ -405,22 +567,31 @@ public final class BioBuzzPedroAuto extends LinearOpMode {
         }
 
         void start() {
+            if (front != null) front.moveToHome();
             if (turret != null) {
                 turret.teachingMode(false);
                 if (turret.calibrated()) {
                     turret.homeAtRight();
-                    if (turret.isHomed()) RobotStateStorage.recordTurretHome(turret.homeTick());
+                    if (turret.isHomed()) {
+                        RobotStateStorage.recordTurretHome(turret.homeTick());
+                        RobotStateStorage.recordTurretSample(turret.lastTick(), turret.angle);
+                    } else {
+                        RobotStateStorage.clearTurretHome();
+                    }
                 }
             }
             armed = true;
-            lastUpdate = Maths.time();
+            startedAt = lastUpdate = Maths.time();
         }
 
-        boolean hasTurretHome() { return turret != null && turret.isHomed(); }
+        boolean hasTurretHome() { return turret != null && turret.isHomed() && !turret.outOfTravel(); }
         int turretHomeTick() { return turret == null ? 0 : turret.homeTick(); }
+        int turretLastTick() { return turret == null ? 0 : turret.lastTick(); }
+        double turretAngle() { return turret == null ? 0 : turret.angle; }
         String frontStatus() { return front == null ? "初始化失败" : front.status(); }
         String shotMapStatus() { return shotMap == null ? "射界数据读取失败" : shotMap.description(); }
         void lowerFront(boolean lowered) { if (front != null) front.setLowered(lowered); }
+        void forceLowerFront(boolean lowered) { if (front != null) front.forceLowered(lowered); }
 
         void collect(boolean enable) {
             if (collecting == enable) return;
@@ -451,12 +622,31 @@ public final class BioBuzzPedroAuto extends LinearOpMode {
             double targetRpm = Maths.clip(CornerAim.targetRpm(aim), 0, maxRpm);
             boolean noFireZone = CornerAim.noFireZone(pose);
             boolean trackingTurret = pose.headingUsable() && positionForAim;
-            setFeeding(shot.update(triggerPressed, false, noFireZone, trackingTurret, false, targetRpm, false));
+            boolean startupReady = Double.isFinite(startedAt)
+                    && now - startedAt >= Math.max(0.0, RobotConfig.AUTO_STARTUP_SPINUP_SECONDS);
+            setFeeding(shot.update(triggerPressed, false, noFireZone, trackingTurret, false,
+                    targetRpm, true, false, startupReady, Math.max(0.0, RobotConfig.AUTO_RPM_SETTLE_SECONDS)));
             if (triggerPressed) {
                 shotStatus = noFireZone ? "禁射区，继续瞄准"
                         : feeding ? "正在供弹" : shot.waitingStatus();
             }
             return feeding;
+        }
+
+        void showStandby() {
+            telemetry.addData("Pinpoint 右 / 前 / 车头", "%.2f / %.2f 格 / %+.1f°，%s",
+                    -pose.left / RobotConfig.TILE_MM, pose.forward / RobotConfig.TILE_MM,
+                    Math.toDegrees(pose.heading), pose.status);
+            if (turret != null && turret.encoderReady()) {
+                telemetry.addData("云台实际 / 目标", "%.1f° / %.1f°%s", Math.toDegrees(turret.angle),
+                        Math.toDegrees(turret.target), turret.rewinding() ? "，回转中" : "");
+            } else {
+                telemetry.addData("云台", "编码器未就绪");
+            }
+            if (flywheel != null && flywheel.rpmCalibrated()) {
+                telemetry.addData("飞轮实际 / 目标", "%.0f / %.0f RPM", flywheel.rpm(),
+                        60 * flywheel.target / flywheel.ticksPerRev);
+            }
         }
 
         void showVolley(String label, AutoVolley volley) {

@@ -7,7 +7,7 @@ import java.util.List;
 
 /** Periodic battery voltage reader with 12 V nominal compensation and brownout drive cap. */
 public final class BatteryVoltage {
-    private static final double SAMPLE_PERIOD = 0.20;
+    private static final double SAMPLE_PERIOD = 0.10;
     public static final double NOMINAL_VOLTS = 12.0;
     private static final double LOW_VOLTS = 10.2;
     public static final double LOW_DRIVE_LIMIT = 0.80;

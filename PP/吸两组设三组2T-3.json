@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "timestamp": "2026-11-24T13:32:14.122Z",
+  "timestamp": "2026-11-25T19:26:31.718Z",
   "startPoint": {
     "x": 31.155529695398666,
     "y": 8.50444863059304,
@@ -56,7 +56,7 @@
       "waitAfterName": "",
       "kind": "atomic",
       "endPoint": {
-        "x": 9.590010127919243,
+        "x": 9.21166788192994,
         "y": 8.507122427384486
       },
       "controlPoints": [],
@@ -88,18 +88,18 @@
       "name": "抵达后射-准备取花",
       "locked": false,
       "waitBeforeMs": 0,
-      "waitAfterMs": 2000,
+      "waitAfterMs": 0,
       "waitBeforeName": "",
       "waitAfterName": "",
       "kind": "atomic",
       "endPoint": {
-        "x": 46.83928119234245,
-        "y": 127.30046839226765
+        "x": 24.51706558679537,
+        "y": 96.7808643978267
       },
       "controlPoints": [
         {
-          "x": 22.070636017460696,
-          "y": 115.17330680378817
+          "x": 27.24130953061818,
+          "y": 34.71250613310318
         }
       ],
       "heading": {
@@ -127,7 +127,55 @@
     },
     {
       "kind": "atomic",
+      "id": "line-mwwe5318-1q0hgb",
+      "endPoint": {
+        "x": 60.79652010932508,
+        "y": 130.70593359453872
+      },
+      "controlPoints": [
+        {
+          "x": 57.84976357098366,
+          "y": 109.42750057668815
+        }
+      ],
+      "heading": {
+        "type": "linear",
+        "reverse": true,
+        "degrees": 0,
+        "startDeg": 90,
+        "endDeg": 90,
+        "piecewiseHeading": {
+          "segments": [
+            {
+              "startProgress": 0,
+              "endProgress": 1,
+              "interpolationType": "linear",
+              "reversed": false,
+              "parameters": {
+                "startDeg": 0,
+                "endDeg": 0
+              }
+            }
+          ]
+        }
+      },
+      "color": "#76b7b2",
+      "locked": false,
+      "waitBeforeMs": 0,
+      "waitAfterMs": 2000,
+      "waitBeforeName": "",
+      "waitAfterName": ""
+    },
+    {
       "id": "line-mwupin1n-2ztqxj",
+      "color": "#59a14f",
+      "name": "",
+      "locked": false,
+      "waitBeforeMs": 0,
+      "waitAfterMs": 0,
+      "waitBeforeName": "",
+      "waitAfterName": "",
+      "kind": "atomic",
       "endPoint": {
         "x": 46.94814752219868,
         "y": 110.04217305673771
@@ -153,13 +201,7 @@
             }
           ]
         }
-      },
-      "color": "#59a14f",
-      "locked": false,
-      "waitBeforeMs": 0,
-      "waitAfterMs": 0,
-      "waitBeforeName": "",
-      "waitAfterName": ""
+      }
     },
     {
       "id": "line-mwucywzs-hy6551",
@@ -172,8 +214,8 @@
       "waitAfterName": "",
       "kind": "atomic",
       "endPoint": {
-        "x": 46.68113928160291,
-        "y": 129.99643773144493
+        "x": 46.68112773551386,
+        "y": 126.08689734085907
       },
       "controlPoints": [],
       "heading": {
@@ -209,8 +251,8 @@
       "waitAfterName": "",
       "kind": "atomic",
       "endPoint": {
-        "x": 46.558420564562745,
-        "y": 114.45105112872758
+        "x": 46.30619624926622,
+        "y": 109.15426545792185
       },
       "controlPoints": [],
       "heading": {
@@ -246,13 +288,13 @@
       "waitAfterName": "",
       "kind": "atomic",
       "endPoint": {
-        "x": 46.50509556445775,
-        "y": 129.8918455153966
+        "x": 60.62991123502196,
+        "y": 130.64853578041976
       },
       "controlPoints": [
         {
-          "x": 40.2263603636062,
-          "y": 136.34497336818941
+          "x": 62.718092801386845,
+          "y": 110.84718461479433
         }
       ],
       "heading": {
@@ -293,8 +335,8 @@
       },
       "controlPoints": [
         {
-          "x": 51.30342281206861,
-          "y": 100.72348038309248
+          "x": 49.91616021271512,
+          "y": 113.58711674672884
         }
       ],
       "heading": {
@@ -494,6 +536,10 @@
     {
       "kind": "path",
       "lineId": "line-mwucvkfi-sx6uqk"
+    },
+    {
+      "kind": "path",
+      "lineId": "line-mwwe5318-1q0hgb"
     },
     {
       "kind": "path",

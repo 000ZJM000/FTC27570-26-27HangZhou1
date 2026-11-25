@@ -68,40 +68,65 @@ public final class Intake {
 
     /** Paired FR / FL auxiliary servos. */
     public static final class TaskServos {
+        private enum Position { INIT, HOME, LOWERED }
+
         private final Servo right, left;
-        private boolean switched;
+        private Position position = Position.INIT;
 
         public TaskServos(HardwareMap map) {
             right = map.tryGet(Servo.class, RobotConfig.TASK_RIGHT_SERVO);
             left = map.tryGet(Servo.class, RobotConfig.TASK_LEFT_SERVO);
+            if (right != null) right.setPosition(RobotConfig.FR_INIT);
+            if (left != null) left.setPosition(RobotConfig.FL_INIT);
+        }
+
+        public void moveToHome() {
             if (right != null) right.setPosition(RobotConfig.FR_HOME);
             if (left != null) left.setPosition(RobotConfig.FL_HOME);
+            position = Position.HOME;
         }
 
         public void toggle() {
-            setLowered(!switched);
+            setLowered(position != Position.LOWERED);
         }
 
         public void setLowered(boolean lowered) {
-            if (!configured() || switched == lowered) return;
-            right.setPosition(lowered ? RobotConfig.FR_OTHER : RobotConfig.FR_HOME);
-            left.setPosition(lowered ? RobotConfig.FL_OTHER : RobotConfig.FL_HOME);
-            switched = lowered;
+            apply(lowered ? Position.LOWERED : Position.HOME, false);
+        }
+
+        public void forceLowered(boolean lowered) {
+            apply(lowered ? Position.LOWERED : Position.HOME, true);
+        }
+
+        private void apply(Position target, boolean force) {
+            if (right == null && left == null) return;
+            if (!force && position == target) return;
+            boolean lowered = target == Position.LOWERED;
+            if (right != null) ControlLoop.safeStop(RobotConfig.TASK_RIGHT_SERVO,
+                    () -> right.setPosition(lowered ? RobotConfig.FR_OTHER : RobotConfig.FR_HOME));
+            if (left != null) ControlLoop.safeStop(RobotConfig.TASK_LEFT_SERVO,
+                    () -> left.setPosition(lowered ? RobotConfig.FL_OTHER : RobotConfig.FL_HOME));
+            position = target;
+            RobotLog.ii("BioBuzzAuto", "FR/FL %s -> %s", force ? "force" : "set", status());
         }
 
         public boolean configured() { return right != null && left != null; }
 
         public void stop() {
+            if (position == Position.INIT) return;
             if (right != null) ControlLoop.safeStop(RobotConfig.TASK_RIGHT_SERVO, () -> right.setPosition(RobotConfig.FR_HOME));
             if (left != null) ControlLoop.safeStop(RobotConfig.TASK_LEFT_SERVO, () -> left.setPosition(RobotConfig.FL_HOME));
-            switched = false;
+            position = Position.HOME;
         }
 
         public String status() {
             if (right == null && left == null) return "未配置 FR、FL";
             if (right == null) return "未配置 FR";
             if (left == null) return "未配置 FL";
-            return switched ? "0.00 / 1.00" : "0.94 / 0.06";
+            if (position == Position.INIT) return String.format("初始化 %.3f / %.3f", RobotConfig.FR_INIT, RobotConfig.FL_INIT);
+            return position == Position.LOWERED
+                    ? String.format("放下 %.2f / %.2f", RobotConfig.FR_OTHER, RobotConfig.FL_OTHER)
+                    : String.format("收回 %.2f / %.3f", RobotConfig.FR_HOME, RobotConfig.FL_HOME);
         }
     }
 }

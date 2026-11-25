@@ -67,8 +67,9 @@ public final class Drive {
     }
 
     private void apply(int index, double requested, double step, double limit) {
-        double previous = applied[index];
-        double next = previous + Maths.clip(requested - previous, -step, step);
+        double next = RobotConfig.DRIVE_SLEW_ENABLED
+                ? applied[index] + Maths.clip(requested - applied[index], -step, step)
+                : requested;
         // Reduce immediately to the new cap when battery protection activates.
         next = Maths.clip(next, -limit, limit);
         motors[index].setPower(next);
@@ -143,7 +144,8 @@ public final class Drive {
 
         public double mapDuty(double stick, double forward, double left, BatteryVoltage battery, double maxPower) {
             if (stick == 0 || !Double.isFinite(stick)) return 0;
-            if (!calibrated) return Maths.clip(stick, -maxPower, maxPower);
+            if (!RobotConfig.ENABLE_TURN_LINEARITY || !calibrated) return Maths.clip(stick, -maxPower, maxPower);
+            if (Math.abs(stick) >= 0.98) return Math.copySign(maxPower, stick);
             double nominal = mapNominal(stick, forward, left);
             return battery.duty(nominal, maxPower);
         }

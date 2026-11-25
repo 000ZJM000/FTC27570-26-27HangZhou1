@@ -22,29 +22,34 @@ public final class ShotMap {
     private enum Source { LOCAL_FILE, BUNDLED_ASSET, FITTED_FROM_06, NONE }
 
     private final Model model;
+    private final Model rightModel;
     private final Source source;
 
     public ShotMap(CalibrationStore store) {
-        Model loaded = tryRead(store.readLocalJson(FILE));
+        FitResult loaded = tryRead(store.readLocalJson(FILE));
         if (loaded != null) {
-            model = loaded;
+            model = loaded.left;
+            rightModel = loaded.right;
             source = Source.LOCAL_FILE;
             return;
         }
         loaded = tryRead(store.readBundledAssetJson(FILE));
         if (loaded != null) {
-            model = loaded;
+            model = loaded.left;
+            rightModel = loaded.right;
             source = Source.BUNDLED_ASSET;
             return;
         }
-        model = fit(recordPoints(store));
+        FitResult fitted = fit(recordPoints(store));
+        model = fitted == null ? null : fitted.left;
+        rightModel = fitted == null ? null : fitted.right;
         source = model != null ? Source.FITTED_FROM_06 : Source.NONE;
     }
 
-    private static Model tryRead(JSONObject document) {
+    private static FitResult tryRead(JSONObject document) {
         if (document == null) return null;
         try {
-            return readModel(document);
+            return readModels(document);
         } catch (JSONException invalid) {
             RobotLog.ww("BioBuzzShot", "shot_model.json: %s", invalid.toString());
             return null;
@@ -53,10 +58,14 @@ public final class ShotMap {
 
     public String description() {
         switch (source) {
-            case LOCAL_FILE: return "已加载本机 shot_model.json";
-            case BUNDLED_ASSET: return "已加载 APK 内置 shot_model.json";
-            case FITTED_FROM_06: return "从 06 实测拟合";
-            default: return "等待 06 实测（回退几何自瞄）";
+            case LOCAL_FILE:
+                return rightModel != null ? "已加载本机双半场 shot_model.json" : "已加载本机 shot_model.json";
+            case BUNDLED_ASSET:
+                return rightModel != null ? "已加载 APK 内置双半场 shot_model.json" : "已加载 APK 内置 shot_model.json";
+            case FITTED_FROM_06:
+                return rightModel != null ? "从 06 左右独立拟合" : "从 06 实测拟合";
+            default:
+                return "等待 06 实测（回退几何自瞄）";
         }
     }
 
@@ -66,16 +75,30 @@ public final class ShotMap {
     }
 
     public boolean available() { return model != null; }
-    public double goalRight(boolean rightHalf) { return rightHalf ? FIELD - model.goal[0] : model.goal[0]; }
+
+    public double goalRight(boolean rightHalf) {
+        if (rightHalf && rightModel != null) return rightModel.goal[0];
+        return rightHalf ? FIELD - model.goal[0] : model.goal[0];
+    }
+
     public double goalForward() { return model.goal[1]; }
 
+    public double goalForward(boolean rightHalf) {
+        return rightHalf && rightModel != null ? rightModel.goal[1] : model.goal[1];
+    }
+
     public ShotVectorField.Vector sample(double right, double forward, boolean rightHalf) {
-        if (model == null || !Maths.finite(right, forward)) return null;
-        double local = rightHalf ? FIELD - right : right;
-        double deg = bearing(local, forward, model.goal) + model.angular(local, forward);
-        double angle = Math.toRadians((rightHalf ? -deg : deg) + model.angleTrim);
-        double radius = distance(local, forward, model.goal);
-        double rpm = model.speed(radius) + model.rpmTrim;
+        Model active = rightHalf && rightModel != null ? rightModel : model;
+        if (active == null || !Maths.finite(right, forward)) return null;
+        double halfYawOffset = rightHalf ? RobotConfig.SHOT_RIGHT_YAW_OFFSET_DEG : RobotConfig.SHOT_LEFT_YAW_OFFSET_DEG;
+        double halfRpmOffset = rightHalf ? RobotConfig.SHOT_RIGHT_RPM_OFFSET : RobotConfig.SHOT_LEFT_RPM_OFFSET;
+        boolean directRight = rightHalf && rightModel != null;
+        double local = directRight ? right : (rightHalf ? FIELD - right : right);
+        double deg = bearing(local, forward, active.goal) + active.angular(local, forward);
+        double mirroredDeg = directRight ? deg : (rightHalf ? -deg : deg);
+        double angle = Math.toRadians(mirroredDeg + active.angleTrim + halfYawOffset);
+        double radius = distance(local, forward, active.goal);
+        double rpm = active.speed(radius) + active.rpmTrim + halfRpmOffset;
         return Maths.finite(angle, rpm) && rpm > 0 ? ShotVectorField.Vector.fromShot(angle, Math.min(20_000, rpm)) : null;
     }
 
@@ -132,19 +155,59 @@ public final class ShotMap {
     private static double wrapDegrees(double degrees) { return Math.toDegrees(Maths.wrap(Math.toRadians(degrees))); }
     private static double distance(double x, double y, double[] goal) { return Math.hypot(x - goal[0], y - goal[1]); }
 
-    private static Model fit(List<ShotVectorField.PointData> measured) {
-        List<double[]> points = new ArrayList<>();
+    private static FitResult fit(List<ShotVectorField.PointData> measured) {
+        List<double[]> leftRaw = new ArrayList<>();
+        List<double[]> rightRaw = new ArrayList<>();
         double tile = RobotConfig.TILE_MM;
         for (ShotVectorField.PointData point : measured) {
             if (point.shot == null || point.unreachable || point.inactive) continue;
             double x = point.rightTiles + RobotConfig.TURRET_RIGHT_MM / tile;
             double y = point.forwardTiles + RobotConfig.TURRET_FORWARD_MM / tile;
             double deg = Math.toDegrees(point.shot.bearing());
-            boolean right = point.rightTiles >= MIDLINE;
-            points.add(new double[]{right ? FIELD - x : x, y, right ? -deg : deg, point.shot.rpm()});
+            double[] sample = {x, y, deg, point.shot.rpm()};
+            if (point.rightTiles >= MIDLINE) rightRaw.add(sample);
+            else leftRaw.add(sample);
         }
-        if (points.isEmpty()) return null;
-        double[] goal = fitGoal(points);
+        if (leftRaw.isEmpty() && rightRaw.isEmpty()) return null;
+
+        if (leftRaw.size() >= 6 && rightRaw.size() >= 6) {
+            return new FitResult(fitHalf(leftRaw, 2.0, 2.5, 0.0), fitHalf(rightRaw, FIELD - 2.0, 2.5, 0.0));
+        }
+
+        double solvedTrim = 0.0;
+        if (!leftRaw.isEmpty() && !rightRaw.isEmpty()) {
+            boolean leftLarger = leftRaw.size() >= rightRaw.size();
+            List<double[]> larger = mirrorToLeft(leftLarger ? leftRaw : rightRaw, !leftLarger, 0.0);
+            Model prelim = fitHalf(larger, 2.0, 2.5, 0.0);
+            List<double[]> smaller = leftLarger ? rightRaw : leftRaw;
+            boolean smallerOnRight = leftLarger;
+            double sumResidual = 0.0;
+            for (double[] p : smaller) {
+                double local = smallerOnRight ? FIELD - p[0] : p[0];
+                double predDeg = bearing(local, p[1], prelim.goal) + prelim.angular(local, p[1]);
+                double mirroredPred = smallerOnRight ? -predDeg : predDeg;
+                sumResidual += wrapDegrees(p[2] - mirroredPred);
+            }
+            solvedTrim = Maths.clip(0.5 * (sumResidual / smaller.size()), -15.0, 15.0);
+        }
+
+        List<double[]> combined = new ArrayList<>(leftRaw.size() + rightRaw.size());
+        combined.addAll(mirrorToLeft(leftRaw, false, solvedTrim));
+        combined.addAll(mirrorToLeft(rightRaw, true, solvedTrim));
+        return new FitResult(fitHalf(combined, 2.0, 2.5, solvedTrim), null);
+    }
+
+    private static List<double[]> mirrorToLeft(List<double[]> points, boolean rightHalf, double angleTrim) {
+        List<double[]> result = new ArrayList<>(points.size());
+        for (double[] p : points) {
+            double unbiased = wrapDegrees(p[2] - angleTrim);
+            result.add(new double[]{rightHalf ? FIELD - p[0] : p[0], p[1], rightHalf ? -unbiased : unbiased, p[3]});
+        }
+        return result;
+    }
+
+    private static Model fitHalf(List<double[]> points, double priorX, double priorY, double angleTrim) {
+        double[] goal = fitGoal(points, priorX, priorY);
         double[] nx = normalization(points, 0), ny = normalization(points, 1);
         double[][] radii = new double[points.size()][1];
         for (int i = 0; i < points.size(); i++) {
@@ -162,7 +225,7 @@ public final class ShotMap {
             rpm.add(new double[]{1, r, r * r}, p[3], 1);
         }
         return new Model(goal, new int[][]{{0, 0}, {1, 0}, {0, 1}}, nx, ny,
-                angular.solve(), nr, rpm.solve(), 0, 0);
+                angular.solve(), nr, rpm.solve(), angleTrim, 0);
     }
 
     private static double[] normalization(List<double[]> points, int column) {
@@ -179,8 +242,8 @@ public final class ShotMap {
         return Maths.clip((x - normalization[0]) / normalization[1], -3, 3);
     }
 
-    private static double[] fitGoal(List<double[]> points) {
-        Maths.LeastSquares seed = new Maths.LeastSquares(new double[]{0.018, 0.018}, new double[]{2, 2.5});
+    private static double[] fitGoal(List<double[]> points, double priorX, double priorY) {
+        Maths.LeastSquares seed = new Maths.LeastSquares(new double[]{0.018, 0.018}, new double[]{priorX, priorY});
         for (double[] p : points) {
             double angle = Math.toRadians(p[2]);
             double c = Math.cos(angle), s = Math.sin(angle);
@@ -224,11 +287,17 @@ public final class ShotMap {
         return sum;
     }
 
-    private static Model readModel(JSONObject document) throws JSONException {
+    private static FitResult readModels(JSONObject document) throws JSONException {
         if (document.optInt("version") != 2 || !"biobuzz-shot-model".equals(document.optString("kind"))) {
             throw new JSONException("unsupported format");
         }
-        JSONObject model = document.getJSONObject("model");
+        Model left = parseModel(document.getJSONObject("model"));
+        JSONObject rightDoc = document.optJSONObject("rightModel");
+        Model right = rightDoc != null ? parseModel(rightDoc) : null;
+        return new FitResult(left, right);
+    }
+
+    private static Model parseModel(JSONObject model) throws JSONException {
         double[] goal = vector(model.getJSONArray("goal"), 2, 2);
         if (goal[0] < 0 || goal[0] > FIELD || goal[1] < 0 || goal[1] > FIELD) throw new JSONException("goal outside field");
         JSONObject angular = model.getJSONObject("angular"), speed = model.getJSONObject("speed");
@@ -250,6 +319,15 @@ public final class ShotMap {
         }
         return new Model(goal, terms, nx, ny, coefficients, nr,
                 vector(speed.getJSONArray("coefficients"), 1, 4), angleTrim, rpmTrim);
+    }
+
+    private static final class FitResult {
+        final Model left, right;
+
+        FitResult(Model left, Model right) {
+            this.left = left;
+            this.right = right;
+        }
     }
 
     private static double[] normalization(JSONObject model, String key) throws JSONException {

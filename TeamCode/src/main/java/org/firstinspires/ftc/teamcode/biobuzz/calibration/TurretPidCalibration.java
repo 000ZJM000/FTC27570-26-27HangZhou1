@@ -1,6 +1,7 @@
 package org.firstinspires.ftc.teamcode.biobuzz.calibration;
 
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.util.RobotLog;
 import org.firstinspires.ftc.teamcode.biobuzz.calibration.CalibrationOp.StepScore;
 import org.firstinspires.ftc.teamcode.biobuzz.config.CalibrationStore;
 import org.firstinspires.ftc.teamcode.biobuzz.config.RobotConfig;
@@ -55,7 +56,6 @@ public final class TurretPidCalibration extends CalibrationOp {
     static final class Tuning {
         private static final double HOLD = 0.12;
         private static final double[] VERIFICATION_CENTERS = {0.27, 0.39};
-        private static final int[] SEARCH_POSITIONS = {0, 2, 4, 5, 3, 1};
         private final CalibrationOp op;
         private int trials;
         private BayesianPidSearch completed;
@@ -72,26 +72,37 @@ public final class TurretPidCalibration extends CalibrationOp {
             Plant plant = Plant.load(op.store);
             double[] seed = plant.pidSeed(plant.baseline());
             double[] min = {
-                    Math.min(0.55 * seed[0], 0.85 * current[0]),
-                    Math.min(0.40 * seed[1], 0.85 * current[1]),
-                    Math.min(0.30 * seed[2], 0.85 * current[2])
+                    Math.max(0.05, Math.min(0.40 * seed[0], 0.70 * current[0])),
+                    Math.min(0.25 * seed[1], 0.60 * current[1]),
+                    Math.min(0.20 * seed[2], 0.60 * current[2])
             };
             double[] max = {
-                    Math.max(1.65 * seed[0], 1.15 * current[0]),
-                    Math.max(1.85 * seed[1], 1.15 * current[1]),
-                    Math.max(1.75 * seed[2] + 0.04, 1.15 * current[2] + 0.01)
+                    Math.max(2.10 * seed[0], 1.35 * current[0]),
+                    Math.max(2.50 * seed[1] + 0.05, 1.35 * current[1]),
+                    Math.max(2.40 * seed[2] + 0.06, 1.35 * current[2] + 0.02)
+            };
+            double[] seedNorm = {
+                    Maths.clip((seed[0] - min[0]) / Math.max(1e-9, max[0] - min[0]), 0, 1),
+                    Maths.clip((seed[1] - min[1]) / Math.max(1e-9, max[1] - min[1]), 0, 1),
+                    Maths.clip((seed[2] - min[2]) / Math.max(1e-9, max[2] - min[2]), 0, 1)
             };
             BayesianPidSearch search = new BayesianPidSearch(min, max,
-                    new double[]{seed[0], seed[1], Math.max(0.03, seed[2])});
-            double[] positioningGains = drive == null ? current : seed;
+                    new double[]{seed[0], Math.max(0.02, seed[1]), Math.max(0.03, seed[2])}, seedNorm);
+            boolean pidStale = op.store.isTurretKeyStale(CalibrationStore.TURRET_PID);
+            double[] positioningGains = (drive == null && turret.usesSavedPid() && !pidStale) ? current : seed;
+            RobotLog.ii("BioBuzzCalibration",
+                    "Turret PID search start: current=[%.3f, %.3f, %.3f] seed=[%.3f, %.3f, %.3f] "
+                            + "min=[%.3f, %.3f, %.3f] max=[%.3f, %.3f, %.3f] pidStale=%b",
+                    current[0], current[1], current[2], seed[0], seed[1], seed[2],
+                    min[0], min[1], min[2], max[0], max[1], max[2], pidStale);
             completed = search;
             boolean saved = false;
             try {
-                double[] history = op.store.turretStale() ? new double[0]
+                double[] history = pidStale ? new double[0]
                         : op.store.readHistory(CalibrationStore.TURRET_PID_HISTORY, BayesianPidSearch.HISTORY_STRIDE,
                                 BayesianPidSearch.HISTORY_ROWS);
                 search.tune(current,
-                        (gains, verification, pattern) -> trial(turret, positioningGains, gains, verification, pattern),
+                        (gains, verification, pattern) -> trial(turret, positioningGains, seed, gains, verification, pattern),
                         () -> !active(), history);
                 if (!active()) {
                     outcome = "云台 PID 测量已停止";
@@ -102,30 +113,52 @@ public final class TurretPidCalibration extends CalibrationOp {
                 BayesianPidSearch.Review best = search.bestCandidate();
                 BayesianPidSearch.Review original = search.incumbent();
                 if (original != null && original.qualified() && (best == null || original.score <= best.score)) best = original;
-                if (best == null) {
-                    outcome = "本轮缺少通过留出复测的 PID";
-                    return false;
-                }
                 boolean full = drive != null;
+                boolean fallbackCandidate = false;
+                if (best == null) {
+                    BayesianPidSearch.Review fallback = !full ? search.bestFallbackCandidate() : null;
+                    if (fallback == null) {
+                        outcome = "本轮缺少通过留出复测的 PID";
+                        RobotLog.ww("BioBuzzCalibration", "Turret PID search failed: no candidate passed verification");
+                        return false;
+                    }
+                    best = fallback;
+                    fallbackCandidate = true;
+                }
                 turret.setPidGains(best.gains);
                 if (RewindCheck.supported(turret)) {
                     RewindCheck check = new RewindCheck(op, turret);
                     rewindOutcome = full ? check.run(drive, pose) : check.run(true);
-                    if (!check.passed() || !active()) {
+                    RobotLog.ii("BioBuzzCalibration",
+                            "Turret rewind check (full=%b skipped=%b passed=%b): %s",
+                            full, check.skipped(), check.passed(), rewindOutcome);
+                    if ((!check.passed() && !(!full && check.skipped())) || !active()) {
                         outcome = "双向回转未通过，保留原 PID";
                         return false;
                     }
                 } else rewindOutcome = "行程不足 270°，按双组阶跃验收";
                 turret.stop();
-                if (!full && best != original && !op.choosePid(search, best, () -> op.telemetry.addData("回转", rewindOutcome))) {
+                String choosePrompt = fallbackCandidate
+                        ? "留出复测未满 2/2。A 仍保存此最佳新 PID，B 保留旧 PID。"
+                        : "请选择 PID。A 保存最佳新值，B 保留旧值。代价越低越好。";
+                if (!full && best != original && !op.choosePid(choosePrompt, search, best,
+                        () -> op.telemetry.addData("回转", rewindOutcome))) {
                     outcome = "保留旧 PID";
                     return false;
                 }
-                saved = active() && op.store.saveTurretPid(best.gains, best.steadyError);
+                double steadyToSave = Double.isFinite(best.steadyError) && best.steadyError > 0
+                        ? best.steadyError : Math.toRadians(2.5);
+                saved = active() && op.store.saveTurretPid(best.gains, steadyToSave);
+                double displayScore = best.qualified() ? best.score : best.measuredScore;
+                String outcomePrefix = best == original ? "原 PID 通过复测"
+                        : best.qualified() ? "已保存新 12V PID"
+                        : String.format(Locale.ROOT, "已确认保存新 12V PID（复测 %d/%d）",
+                                best.passed, BayesianPidSearch.VERIFICATION_ROUNDS);
                 outcome = saved ? String.format(Locale.ROOT, "%s，验收代价 %.3f，最大末端误差 %.2f°",
-                        best == original ? "原 PID 通过复测" : "已保存新 12V PID",
-                        best.score, Math.toDegrees(best.steadyError)) : "PID 未写入";
+                        outcomePrefix, displayScore, Math.toDegrees(steadyToSave)) : "PID 未写入";
                 op.telemetry.log().add("%s，P/I/D %.3f / %.3f / %.3f", outcome, best.gains[0], best.gains[1], best.gains[2]);
+                RobotLog.ii("BioBuzzCalibration", "Turret PID result (saved=%b): %s | P=%.3f I=%.3f D=%.3f",
+                        saved, outcome, best.gains[0], best.gains[1], best.gains[2]);
                 return saved;
             } finally {
                 turret.stop();
@@ -141,7 +174,8 @@ public final class TurretPidCalibration extends CalibrationOp {
                     completed.historyCount(), completed.searchCount(), costText(completed.bestSearchCost()));
             op.telemetry.addData("PID 动作峰值", "%.2f V", 12 * peakPower);
             op.showPidReview("进入校准时", completed.incumbent());
-            op.showPidReview("最佳新候选", completed.bestCandidate());
+            BayesianPidSearch.Review bestNew = completed.bestCandidate();
+            op.showPidReview("最佳新候选", bestNew != null ? bestNew : completed.bestFallbackCandidate());
         }
 
         void quickCheck(Turret turret) throws InterruptedException {
@@ -185,24 +219,33 @@ public final class TurretPidCalibration extends CalibrationOp {
             return Double.isFinite(cost) ? String.format(Locale.US, "%.3f", cost) : "无";
         }
 
-        private BayesianPidSearch.Result trial(Turret turret, double[] positioningGains, double[] gains,
-                                               boolean verification, int pattern) throws InterruptedException {
+        private BayesianPidSearch.Result trial(Turret turret, double[] positioningGains, double[] seed,
+                                               double[] gains, boolean verification, int pattern)
+                throws InterruptedException {
             double span = turret.span();
-            if (!verification) pattern = SEARCH_POSITIONS[pattern];
-            double sign = pattern % 2 == 0 ? 1 : -1;
-            double band = verification ? VERIFICATION_CENTERS[pattern] : 0.24 + 0.055 * (pattern / 2);
+            double sign = verification ? (pattern % 2 == 0 ? 1 : -1) : 1.0;
+            double band = verification ? VERIFICATION_CENTERS[pattern % VERIFICATION_CENTERS.length] : 0.36;
             double center = span * (sign > 0 ? band : 1 - band);
             turret.setPidGains(positioningGains);
             if (!TurretBench.go(op, turret, center, Math.toRadians(2.2))) {
-                return BayesianPidSearch.Result.unavailable(String.format(Locale.US, "起始角 %.1f° 就位失败",
-                        Math.toDegrees(center)));
+                if (positioningGains != seed) {
+                    RobotLog.ww("BioBuzzCalibration",
+                            "Positioning to %.1f deg failed with current PID; retrying with seed",
+                            Math.toDegrees(center));
+                    turret.setPidGains(seed);
+                }
+                if (positioningGains == seed || !TurretBench.go(op, turret, center, Math.toRadians(2.2))) {
+                    return BayesianPidSearch.Result.unavailable(String.format(Locale.US, "起始角 %.1f° 就位失败",
+                            Math.toDegrees(center)));
+                }
             }
             turret.setPidGains(gains);
             trials++;
             double small = Math.min(Math.toRadians(18), span * 0.13);
             double large = Math.min(Math.toRadians(105), span * 0.29);
             double[] targets = {center - sign * small, center, center + sign * large, center};
-            double total = 0, worst = 0, margin = 0.34, steadyError = 0;
+            double total = 0, worst = 0, margin = 0.34, steadyError = 0, totalSettle = 0;
+            int maxReversals = 0;
             boolean settled = true;
             String firstFailure = "";
             for (int i = 0; i < targets.length; i++) {
@@ -223,28 +266,67 @@ public final class TurretPidCalibration extends CalibrationOp {
                 steadyError = Math.max(steadyError, Math.abs(run.endError));
                 if (!active()) return null;
                 if (run.readFailed) return BayesianPidSearch.Result.unavailable(step + " 编码器或电机读数中断");
-                if (run.unsafe) return new BayesianPidSearch.Result(10, -0.6, false,
-                        step + (run.limitReached ? " 触发安全行程" : " 超调超过 8°"));
+                if (run.unsafe) {
+                    String reason = step + (run.limitReached ? " 触发安全行程"
+                            : String.format(Locale.US, " 超调 %.1f°（安全上限 %.0f°）",
+                                    Math.toDegrees(run.overshoot), Math.toDegrees(run.hardOvershootLimit)));
+                    RobotLog.ii("BioBuzzCalibration", "Turret trial %d unsafe (%s): P=%.3f I=%.3f D=%.3f",
+                            trials, reason, gains[0], gains[1], gains[2]);
+                    return new BayesianPidSearch.Result(9.0, -0.22, false, reason);
+                }
                 StepScore response = run.response;
-                boolean arrived = Double.isFinite(response.settlingTime(HOLD));
-                margin = Math.min(margin, 0.34 - response.overshoot());
+                double stepDuration = i >= 2 ? 2.65 : 1.85;
+                double settleTime = response.settlingTime(HOLD);
+                boolean arrived = Double.isFinite(settleTime);
+                double effectiveSettle = arrived ? settleTime : stepDuration;
+                totalSettle += effectiveSettle;
+                maxReversals = Math.max(maxReversals, run.reversals);
+                double stepAbs = Math.abs(change);
+                double overDeg = Math.toDegrees(run.overshoot);
+                double oscDeg = Math.toDegrees(run.postArrivalTravel);
+                double endErrDeg = Math.toDegrees(Math.abs(run.endError));
+                double softLimit = stepAbs > Math.toRadians(50) ? Math.min(0.28, Math.toRadians(16.0) / stepAbs) : 0.34;
+                double overshootMargin = (softLimit - response.overshoot()) / softLimit * 0.34;
+                double maxOscDeg = Math.max(22.0, 0.60 * Math.toDegrees(stepAbs));
+                double oscMargin = 0.34;
+                if (run.reversals >= 3) {
+                    oscMargin = Math.min(oscMargin, -0.08 * (run.reversals - 2));
+                }
+                if (oscDeg > maxOscDeg) {
+                    oscMargin = Math.min(oscMargin, -0.02 * (oscDeg - maxOscDeg));
+                }
+                double stepMargin = Math.min(overshootMargin, oscMargin);
+                margin = Math.min(margin, stepMargin);
                 if (firstFailure.isEmpty()) {
-                    if (response.overshoot() > 0.34) {
-                        firstFailure = String.format(Locale.US, "%s 超调 %.0f%%（上限 34%%）",
-                                step, response.overshoot() * 100);
+                    if (response.overshoot() > softLimit) {
+                        firstFailure = String.format(Locale.US, "%s 超调 %.0f%%（%.1f°，上限 %.0f%%）",
+                                step, response.overshoot() * 100, overDeg, softLimit * 100);
+                    } else if (run.reversals >= 3 || oscDeg > maxOscDeg) {
+                        firstFailure = String.format(Locale.US, "%s 震荡 %d 次（多余行程 %.1f°）",
+                                step, run.reversals, oscDeg);
                     } else if (!arrived) {
                         firstFailure = String.format(Locale.US, "%s 未停稳，末端误差 %+.1f°，速度 %+.0f°/s", step,
                                 Math.toDegrees(run.endError), Math.toDegrees(run.endSpeed));
                     }
                 }
-                double cost = Math.min(9, arrived ? response.scoreWithSettlingTime(HOLD) : 2.6 + response.score());
+                double timeCost = 3.0 * (effectiveSettle / stepDuration) + (arrived ? 0.0 : 2.2);
+                double reversalPenalty = run.reversals == 0 ? 0.0
+                        : (run.reversals == 1 ? 0.25 : 0.25 + 0.90 * (run.reversals - 1));
+                double overshootPenalty = 1.6 * response.overshoot() + 0.06 * Math.max(0.0, overDeg - 1.5);
+                double travelPenalty = 0.055 * Math.max(0.0, oscDeg - 3.0);
+                double endErrCost = 0.12 * Math.max(0.0, endErrDeg - 0.8);
+                double cost = Math.min(9.0, timeCost + reversalPenalty + overshootPenalty + travelPenalty + endErrCost);
                 total += cost;
                 worst = Math.max(worst, cost);
                 settled &= arrived;
             }
             double score = 0.70 * total / targets.length + 0.30 * worst;
-            op.telemetry.log().add("云台第 %d 轮 %.3f，超调裕量 %+.2f%s",
-                    trials, score, margin, settled && margin >= 0 ? "，停稳" : "");
+            op.telemetry.log().add("云台第 %d 轮 %.3f，用时 %.2fs，反转 %d 次，裕量 %+.2f%s",
+                    trials, score, totalSettle, maxReversals, margin, settled && margin >= 0 ? "，停稳" : "");
+            RobotLog.ii("BioBuzzCalibration",
+                    "Turret trial %d (%s): P=%.3f I=%.3f D=%.3f score=%.3f time=%.2fs maxRev=%d margin=%+.3f settled=%b steady=%.2f deg fail=%s",
+                    trials, verification ? "verify" : "search", gains[0], gains[1], gains[2],
+                    score, totalSettle, maxReversals, margin, settled, Math.toDegrees(steadyError), firstFailure);
             return new BayesianPidSearch.Result(score, margin, settled, firstFailure, steadyError);
         }
 
@@ -255,6 +337,7 @@ public final class TurretPidCalibration extends CalibrationOp {
         private final CalibrationOp op;
         private final Turret turret;
         private int passedTurns;
+        private boolean skipped;
 
         RewindCheck(CalibrationOp op, Turret turret) {
             this.op = op;
@@ -263,15 +346,18 @@ public final class TurretPidCalibration extends CalibrationOp {
 
         static boolean supported(Turret turret) { return turret.span() >= Math.toRadians(270); }
         boolean passed() { return passedTurns == 2; }
+        boolean skipped() { return skipped; }
 
         String run(boolean ask) throws InterruptedException {
-            if (ask && !op.confirm("回转验证：清空周围，底盘会依次向左右转。A 开始，双向通过才保存；B 保留原 PID。")) {
-                return "已跳过";
+            if (ask && !op.confirm("回转验证（可选）：轮子落地并清空周围。A 运行双向回转验收；B 跳过回转直接进入阶跃复测保存。")) {
+                skipped = true;
+                return "已跳过（按留出阶跃验收）";
             }
             Drive drive;
             try {
                 drive = new Drive(op.hardwareMap);
             } catch (RuntimeException unavailable) {
+                skipped = true;
                 return "找不到底盘，已跳过";
             }
             PinpointPose pose = new PinpointPose(op.hardwareMap, op.battery);

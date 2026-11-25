@@ -72,8 +72,12 @@ abstract class CalibrationOp extends LinearOpMode {
             showVoltage();
             display.run();
             telemetry.update();
-            if (gamepad1.b) return false;
+            if (gamepad1.b) {
+                while (opModeIsActive() && gamepad1.b) sleep(20);
+                return false;
+            }
             if (gamepad1.a) {
+                while (opModeIsActive() && gamepad1.a) sleep(20);
                 motionAborted = false;
                 lights.show(RearStatusLed.State.CAL_RUNNING);
                 return true;
@@ -85,7 +89,12 @@ abstract class CalibrationOp extends LinearOpMode {
 
     boolean choosePid(BayesianPidSearch search, BayesianPidSearch.Review candidate, Runnable display)
             throws InterruptedException {
-        return confirm("请选择 PID。A 保存最佳新值，B 保留旧值。代价越低越好。", () -> {
+        return choosePid("请选择 PID。A 保存最佳新值，B 保留旧值。代价越低越好。", search, candidate, display);
+    }
+
+    boolean choosePid(String prompt, BayesianPidSearch search, BayesianPidSearch.Review candidate, Runnable display)
+            throws InterruptedException {
+        return confirm(prompt, () -> {
             showPidReview("旧 PID", search.incumbent());
             showPidReview("最佳新 PID", candidate);
             display.run();
@@ -97,6 +106,8 @@ abstract class CalibrationOp extends LinearOpMode {
         telemetry.addData(title + " P / I / D", "%.3f / %.3f / %.3f", row.gains[0], row.gains[1], row.gains[2]);
         if (row.qualified()) telemetry.addData(title + " 复测", "%d/%d 组通过，代价 %.3f",
                 row.passed, BayesianPidSearch.VERIFICATION_ROUNDS, row.score);
+        else if (Double.isFinite(row.measuredScore)) telemetry.addData(title + " 复测", "%d/%d 组通过（均价 %.3f），%s",
+                row.passed, BayesianPidSearch.VERIFICATION_ROUNDS, row.measuredScore, row.firstFailure);
         else telemetry.addData(title + " 复测", "%d/%d 组通过，%s",
                 row.passed, BayesianPidSearch.VERIFICATION_ROUNDS, row.firstFailure);
     }

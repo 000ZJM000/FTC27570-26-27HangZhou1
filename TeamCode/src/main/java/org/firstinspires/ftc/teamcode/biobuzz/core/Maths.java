@@ -41,13 +41,18 @@ public final class Maths {
 
     /** Anti-windup PIDF controller with derivative-on-measurement. */
     public static final class Pid {
-        private final double p, i, d;
+        private final double p, i, d, integralLimit;
         private double integral;
 
         public Pid(double[] gains) {
+            this(gains, 0.20);
+        }
+
+        public Pid(double[] gains, double integralLimit) {
             p = gains[0];
             i = gains[1];
             d = gains[2];
+            this.integralLimit = Math.max(0.05, integralLimit);
         }
 
         public double update(double error, double measuredRate, double ff, double dt,
@@ -64,7 +69,8 @@ public final class Maths {
                              double minOutput, double maxOutput, boolean integrate, double minimumIntegralGain) {
             double base = p * error - d * measuredRate + ff;
             double trial = integrate
-                    ? clip(integral + Math.max(i, minimumIntegralGain) * error * dt, -0.20, 0.20) : integral;
+                    ? clip(integral + Math.max(i, minimumIntegralGain) * error * dt, -integralLimit, integralLimit)
+                    : integral;
             double requested = base + trial;
             if ((requested <= maxOutput || trial <= integral)
                     && (requested >= minOutput || trial >= integral)) {
@@ -72,6 +78,8 @@ public final class Maths {
             }
             return clip(base + integral, minOutput, maxOutput);
         }
+
+        public void clampIntegral(double min, double max) { integral = clip(integral, min, max); }
 
         public double integralDuty() { return integral; }
 

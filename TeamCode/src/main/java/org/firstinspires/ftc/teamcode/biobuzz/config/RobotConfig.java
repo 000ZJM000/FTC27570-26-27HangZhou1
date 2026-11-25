@@ -5,6 +5,8 @@ import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver;
 import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver.EncoderDirection;
 import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver.ErrorDetectionType;
 import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver.GoBildaOdometryPods;
+import com.qualcomm.hardware.rev.RevHubOrientationOnRobot.LogoFacingDirection;
+import com.qualcomm.hardware.rev.RevHubOrientationOnRobot.UsbFacingDirection;
 import com.qualcomm.robotcore.hardware.DcMotorSimple.Direction;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 
@@ -29,6 +31,7 @@ public final class RobotConfig {
     // Expansion Hub encoder port 0 shares its configuration name with the left front drive motor.
     public static final String TURRET_ENCODER = "m-1";
     public static final String PINPOINT = "pinpoint";
+    public static final String HUB_IMU = "imu";
     public static final String REAR_STATUS_LED = "LED";
 
     // REV Through Bore Encoder V2 (REV-11-3174), on the shaft after the 5.2:1 gearbox.
@@ -76,27 +79,47 @@ public final class RobotConfig {
 
     public static final double INTAKE_POWER = 1.0;
     public static final double INTAKE_REVERSE_POWER = 1.0;
-    public static final double SL_INTAKE = 0.97, SR_INTAKE = 0.02;
+    public static final double SL_INTAKE = 0.95, SR_INTAKE = 0.035;
     public static final double SL_UP = 0.825, SR_UP = 0.16;
+    public static final double SL_FULL_UP = 0.68, SR_FULL_UP = 0.31; // reserved only; do not wire into behavior yet
     public static final double SB_IDLE = 0.25, SB_FIRE = 0.60;
     public static final double ST_HOME = 0.47, ST_HIGH = 0.05;
-    public static final double FR_HOME = 0.94, FR_OTHER = 0.0;
-    public static final double FL_HOME = 0.06, FL_OTHER = 1.0;
+    public static final double FR_INIT = 0.855, FR_HOME = 0.98, FR_OTHER = 0.0;
+    public static final double FL_INIT = 0.155, FL_HOME = 0.055, FL_OTHER = 1.0;
 
     // =========================================================================
     // FTC Dashboard (@Config) Tunable Match & SOTM Parameters (Must NOT be final)
     // =========================================================================
+    // Pinpoint + Control Hub IMU joint fallback mode (Hub IMU fills heading/yawRate only on Pinpoint bad reads)
+    public static boolean ENABLE_HUB_IMU_BACKUP = true;
+    public static LogoFacingDirection HUB_IMU_LOGO_DIR = LogoFacingDirection.RIGHT;
+    public static UsbFacingDirection HUB_IMU_USB_DIR = UsbFacingDirection.UP;
+
     public static boolean ENABLE_MOVING_LEAD = true;
-    public static double SHOT_RELEASE_SECONDS = 0.080;
+    public static double SHOT_RELEASE_SECONDS = 0.140;
     public static double FLIGHT_NEAR_MM = 1000.0;
-    public static double FLIGHT_NEAR_SECONDS = 0.16;
+    public static double FLIGHT_NEAR_SECONDS = 0.34;
     public static double FLIGHT_FAR_MM = 3500.0;
-    public static double FLIGHT_FAR_SECONDS = 0.42;
+    public static double FLIGHT_FAR_SECONDS = 0.78;
     public static double BRAKE_FORWARD_MM_S2 = 2800.0;
     public static double BRAKE_SIDE_MM_S2 = 2000.0;
+    public static double SOTM_LEAD_SCALE = 1.0;
+    public static double SOTM_MAX_LEAD_MM = 1350.0;
+    public static double TURRET_REWIND_LOOKAHEAD_SCALE = 1.0;
+
+    // Optional per-half shooting offsets (degrees / RPM, added after half-field mirroring)
+    public static double SHOT_LEFT_YAW_OFFSET_DEG = 0.0;
+    public static double SHOT_RIGHT_YAW_OFFSET_DEG = 0.0;
+    public static double SHOT_LEFT_RPM_OFFSET = 0.0;
+    public static double SHOT_RIGHT_RPM_OFFSET = 0.0;
 
     public static double FLYWHEEL_TARGET_RPM = 3100.0;
     public static double FLYWHEEL_RPM_STEP = 100.0;
+
+    // TeleOp drive behavior & full-power options
+    public static boolean ENABLE_DRIVE_LOW_VOLT_CAP = false;
+    public static boolean DRIVE_SLEW_ENABLED = false;
+    public static boolean ENABLE_TURN_LINEARITY = true;
 
     // Gamepad 2 tuning step sizes
     public static double G2_RPM_FINE_STEP = 25.0;
@@ -108,19 +131,33 @@ public final class RobotConfig {
     public static double AUTO_STALL_SPEED_IPS = 0.5;
     public static double AUTO_STALL_YAW_DEG_S = 4.0;
     public static double AUTO_VOLLEY_FEED_SECONDS = 0.90;
-    public static double AUTO_VOLLEY_MAX_EXTRA_SECONDS = 1.00;
+    public static double AUTO_VOLLEY_MAX_EXTRA_SECONDS = 1.50;
+    public static double AUTO_STARTUP_SPINUP_SECONDS = 0.60;
+    public static double AUTO_RPM_SETTLE_SECONDS = 0.10;
+    public static double AUTO_LEG4_SHOOT_DELAY_SECONDS = 0.30;
+    public static int AUTO_LEG6_BUMP_CYCLES = 3;
+    public static double AUTO_LEG6_BACK_SECONDS = 0.20;
+    public static double AUTO_LEG6_PUSH_SECONDS = 1.00;
+    public static double AUTO_LEG6_BUMP_POWER = 0.70;
+    public static double AUTO_FRONT_LOWER_SETTLE_SECONDS = 0.45;
     public static double AUTO_POS_TOLERANCE_IN = 1.5;
     public static double AUTO_HEADING_TOLERANCE_DEG = 7.0;
 
-    public static double PEDRO_FWD_P = 0.15;
-    public static double PEDRO_STRAFE_P = 0.18;
-    public static double PEDRO_HEADING_P = 1.6;
+    public static double PEDRO_FWD_P = 0.18;
+    public static double PEDRO_STRAFE_P = 0.21;
+    public static double PEDRO_HEADING_P = 2.0;
     public static double PEDRO_COAST_S = 0.08;
-    public static double PEDRO_COAST_P = 0.013;
-    public static double PEDRO_BRAKE_P = 0.013;
-    public static double PEDRO_MAX_FWD_VEL = 75.0;
-    public static double PEDRO_MAX_STRAFE_VEL = 65.0;
-    public static double PEDRO_MAX_DECEL = 50.0;
+    public static double PEDRO_COAST_P = 0.016;
+    public static double PEDRO_BRAKE_P = 0.018;
+    public static double PEDRO_MAX_FWD_VEL = 85.0;
+    public static double PEDRO_MAX_STRAFE_VEL = 75.0;
+    public static double PEDRO_MAX_DECEL = 0.0; // <= 0 uses ForesightConfig.Constraint.NONE for full 1.0 cruise speed
+    public static double PEDRO_MAX_BRAKE_POWER = 0.65;
+    public static double PEDRO_HEADING_DEV_TOL_DEG = 28.0;
+    public static double PEDRO_TRANS_DEV_TOL_IN = 6.0;
+    public static double PEDRO_HOLD_TRANS_SCALE = 0.75;
+    public static double PEDRO_HOLD_HEADING_SCALE = 0.65;
+    public static double PEDRO_HEADING_DRIVE_RATIO = 0.35;
 
     /** Configures Pinpoint parameters without resetting position or IMU calibration. */
     public static int configurePinpoint(GoBildaPinpointDriver device) {

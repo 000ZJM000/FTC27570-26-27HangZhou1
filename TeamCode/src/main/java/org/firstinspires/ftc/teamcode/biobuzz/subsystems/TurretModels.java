@@ -162,7 +162,7 @@ public final class TurretModels {
                     double acrossGap = -direction * Maths.wrap(bearing - source);
                     double rateAcrossGap = -direction * relativeRate;
                     double gap = Maths.TURN - (high - low);
-                    if (rateAcrossGap <= 0.20 || acrossGap + rateAcrossGap * lookahead < gap - Math.toRadians(4)) {
+                    if (rateAcrossGap <= 0.15 || acrossGap + rateAcrossGap * lookahead < gap - Math.toRadians(8)) {
                         finishRewind();
                         previousTarget = reachable ? equivalent : source;
                         return previousTarget;
@@ -173,11 +173,11 @@ public final class TurretModels {
                 double forecast = equivalent(bearing + relativeRate * lookahead);
                 double nearCurrent = current + Maths.wrap(bearing - current);
                 double edge = relativeRate > 0 ? high : low;
-                boolean atEdge = Math.abs(current - edge) <= Math.toRadians(26)
-                        && Math.abs(previousTarget - edge) <= Math.toRadians(26);
-                boolean towardEdge = (nearCurrent - edge) * Math.signum(relativeRate) >= -Math.toRadians(12);
-                boolean crosses = Math.abs(relativeRate) > 0.20 && atEdge && towardEdge && forecast <= high
-                        && (edge - forecast) * Math.signum(relativeRate) > Math.PI;
+                boolean atEdge = Math.abs(current - edge) <= Math.toRadians(14)
+                        && Math.abs(previousTarget - edge) <= Math.toRadians(14);
+                boolean towardEdge = (nearCurrent - edge) * Math.signum(relativeRate) >= -Math.toRadians(5);
+                boolean crosses = lookahead > 1e-4 && Math.abs(relativeRate) > 0.65 && atEdge && towardEdge
+                        && forecast <= high && (edge - forecast) * Math.signum(relativeRate) > Math.PI;
                 if (crosses) start(-Math.signum(relativeRate), true);
                 else if (reachable && Math.abs(equivalent - previousTarget) > Math.PI
                         && Math.abs(equivalent - current) > Math.PI) {
@@ -253,7 +253,7 @@ public final class TurretModels {
 
         public void update(double measured, double measuredRate, double dt, double applied,
                            double friction, double kV, double tau) {
-            if (dt > 0.10) {
+            if (dt > 0.25) {
                 reset(measured, measuredRate);
                 return;
             }

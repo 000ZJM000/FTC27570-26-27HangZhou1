@@ -4,6 +4,7 @@ import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.HardwareMap;
+import com.qualcomm.robotcore.util.RobotLog;
 import org.firstinspires.ftc.teamcode.biobuzz.config.CalibrationStore;
 import org.firstinspires.ftc.teamcode.biobuzz.config.RobotConfig;
 import org.firstinspires.ftc.teamcode.biobuzz.core.BatteryVoltage;
@@ -18,6 +19,17 @@ import org.firstinspires.ftc.teamcode.biobuzz.subsystems.TurretModels.Range;
 /** 360-degree turret controller with 12 V compensation, friction/brake feedforward, and forward-zero lock. */
 public final class Turret {
     private static final double OUTPUT_LIMIT = RobotConfig.TURRET_MAX_POWER;
+    private static final double OBSERVER_RESET_RATE = 38.0; // rad/s; resets observer/PID without rejecting ticks
+    private static final double OUT_OF_TRAVEL_MARGIN = Math.toRadians(20.0);
+    private static final double SOFT_HOME_MIN_SECONDS = 0.12;
+    private static final double SOFT_HOME_STALL_SECONDS = 0.16;
+    private static final double SOFT_HOME_TIMEOUT_SECONDS = 4.50;
+    private static final double SOFT_HOME_STALL_RATE = 0.12;
+    private static final double SOFT_HOME_MIN_DUTY = 0.20;
+    private static final double SOFT_HOME_MAX_DUTY = 0.32;
+
+    public enum SoftHomeResult { RUNNING, SUCCEEDED, FAILED }
+
     private final DcMotorEx motor, encoder;
     private final BatteryVoltage battery;
     private final double[] geometry;
@@ -34,7 +46,9 @@ public final class Turret {
     private boolean holding;
     private int homeTick, lastTick, trackedGoal;
     private Integer initTick;
-    private boolean homed, encoderFresh, fieldTracking, motorResponding = true;
+    private boolean homed, encoderFresh, fieldTracking, motorResponding = true, outOfTravel, softHoming;
+    private double softHomeElapsed, softHomeStallSeconds;
+    private int softHomeLastTick;
     private double encoderAge, lastPower;
     private double stillSeconds;
     private double previousCoupledRate, coupledAcceleration, filteredStick;
@@ -115,7 +129,10 @@ public final class Turret {
 
     public double span() { return geometry[2]; }
     public int homeTick() { return homeTick; }
+    public int lastTick() { return lastTick; }
     public boolean isHomed() { return homed; }
+    public boolean outOfTravel() { return outOfTravel; }
+    public boolean softHoming() { return softHoming; }
     public boolean encoderReady() { return homed && encoderFresh; }
     public boolean encoderFault() { return calibrated() && (!homed || encoderAge >= 0.10); }
     public boolean motorResponding() { return motorResponding; }
@@ -142,6 +159,31 @@ public final class Turret {
         }
     }
 
+    /** Verifies whether an inherited homeTick is physically plausible and not invalidated by Hub 2 power loss. */
+    public boolean isInheritedHomePlausible(int savedHomeTick, boolean hasLastTick, int lastKnownTick) {
+        if (!calibrated()) return false;
+        try {
+            int current = rawTicks();
+            double angleRad = geometry[0] * (current - savedHomeTick) / RobotConfig.TICKS_PER_TURRET_RADIAN;
+            if (!Double.isFinite(angleRad) || angleRad < -Math.toRadians(25)
+                    || angleRad > span() + Math.toRadians(25)) {
+                RobotLog.ww("BioBuzzTurret",
+                        "Inherited home rejected (out of range): current=%d home=%d angle=%.1f deg",
+                        current, savedHomeTick, Math.toDegrees(angleRad));
+                return false;
+            }
+            if (current == 0 && Math.abs(savedHomeTick) > 200) {
+                RobotLog.ww("BioBuzzTurret",
+                        "Inherited home rejected (counter reset to exact zero): current=%d last=%d (has=%b) home=%d",
+                        current, lastKnownTick, hasLastTick, savedHomeTick);
+                return false;
+            }
+            return true;
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
     public void homeAtRight() {
         try {
             int right = rawTicks();
@@ -163,6 +205,9 @@ public final class Turret {
         homeTick = right;
         lastTick = current;
         homed = true;
+        outOfTravel = false;
+        softHoming = false;
+        softHomeElapsed = softHomeStallSeconds = 0;
         encoderFresh = true;
         encoderAge = 0;
         angle = geometry[0] * (lastTick - homeTick) / RobotConfig.TICKS_PER_TURRET_RADIAN;
@@ -170,9 +215,77 @@ public final class Turret {
         stop();
     }
 
+    public boolean startSoftHome() {
+        if (!calibrated()) return false;
+        try {
+            int ticks = rawTicks();
+            stop();
+            lastTick = softHomeLastTick = ticks;
+            encoderFresh = true;
+            encoderAge = 0;
+            softHoming = true;
+            softHomeElapsed = 0;
+            softHomeStallSeconds = 0;
+            RobotLog.ii("BioBuzzTurret", "Soft right-stop homing started (ticks=%d)", ticks);
+            return true;
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    public void cancelSoftHome() {
+        if (softHoming) {
+            softHoming = false;
+            stop();
+        }
+    }
+
+    public SoftHomeResult updateSoftHome(double dt) {
+        if (!softHoming || !calibrated()) {
+            softHoming = false;
+            return SoftHomeResult.FAILED;
+        }
+        softHomeElapsed += dt;
+        if (!encoderFresh && encoderAge >= 0.30) {
+            RobotLog.ww("BioBuzzTurret", "Soft right-stop homing aborted: encoder unreadable (age=%.0f ms)",
+                    1000 * encoderAge);
+            softHoming = false;
+            stop();
+            return SoftHomeResult.FAILED;
+        }
+        double duty = Maths.clip(frictionDuty(0, -1, 0) + Math.min(0.16, plant.kV(-1) * 3.0),
+                SOFT_HOME_MIN_DUTY, SOFT_HOME_MAX_DUTY);
+        writePower(battery.duty(-duty, OUTPUT_LIMIT) * geometry[1]);
+        if (motorResponding) appliedPower = battery.nominal(actualDuty * geometry[1]);
+        if (!motorResponding || softHomeElapsed >= SOFT_HOME_TIMEOUT_SECONDS) {
+            RobotLog.ww("BioBuzzTurret", "Soft right-stop homing timed out or motor fault (%.2f s, motor=%b)",
+                    softHomeElapsed, motorResponding);
+            softHoming = false;
+            stop();
+            return SoftHomeResult.FAILED;
+        }
+        double tickDeltaRad = Math.abs(geometry[0] * (lastTick - softHomeLastTick) / RobotConfig.TICKS_PER_TURRET_RADIAN);
+        softHomeLastTick = lastTick;
+        double instantRate = tickDeltaRad / Math.max(dt, 0.001);
+        if (softHomeElapsed >= SOFT_HOME_MIN_SECONDS && encoderFresh
+                && Math.max(instantRate, Math.abs(speed)) <= SOFT_HOME_STALL_RATE) {
+            softHomeStallSeconds += dt;
+            if (softHomeStallSeconds >= SOFT_HOME_STALL_SECONDS) {
+                softHoming = false;
+                home(lastTick, lastTick);
+                RobotLog.ii("BioBuzzTurret", "Soft right-stop homing succeeded: homeTick=%d (%.2f s)",
+                        homeTick, softHomeElapsed);
+                return SoftHomeResult.SUCCEEDED;
+            }
+        } else {
+            softHomeStallSeconds = 0;
+        }
+        return SoftHomeResult.RUNNING;
+    }
+
     public void sample(double dt) {
         battery.update(Maths.time());
-        if (!homed) return;
+        if (!homed && !softHoming) return;
         double wasStillFor = stillSeconds;
         stillSeconds = 0;
         encoderAge += dt;
@@ -180,25 +293,41 @@ public final class Turret {
         encoderFresh = false;
         try {
             int ticks = rawTicks();
+            double stepDt = Math.max(encoderAge, 0.001);
             double change = geometry[0] * (ticks - lastTick) / RobotConfig.TICKS_PER_TURRET_RADIAN;
-            if (Math.abs(change) > Math.toRadians(6) + 40 * Math.min(0.10, encoderAge)) return;
-            angle = geometry[0] * (ticks - homeTick) / RobotConfig.TICKS_PER_TURRET_RADIAN;
-            double measuredSpeed = change / encoderAge;
-            speed += encoderAge / (0.026 + encoderAge) * (measuredSpeed - speed);
-            if (consecutive && encoderAge <= RobotConfig.SHOT_TURRET_STILL_SECONDS
-                    && Math.max(Math.abs(measuredSpeed), Math.abs(speed)) <= RobotConfig.SHOT_TURRET_STILL_RATE) {
-                stillSeconds = wasStillFor + encoderAge;
-            }
-            int direction = Math.abs(speed) > 0.13 ? (speed >= 0 ? 1 : -1) : (appliedPower >= 0 ? 1 : -1);
-            double drag = frictionDuty(angle, direction, speed);
-            if (Math.abs(speed) < 0.13) drag = Math.min(drag, Math.abs(appliedPower));
-            observer.update(angle, speed, encoderAge, appliedPower, direction * drag,
-                    plant.kV(direction), plant.timeConstant(direction));
+            double measuredSpeed = change / stepDt;
             lastTick = ticks;
             encoderFresh = true;
             encoderAge = 0;
+            if (homed) {
+                angle = geometry[0] * (ticks - homeTick) / RobotConfig.TICKS_PER_TURRET_RADIAN;
+                outOfTravel = angle < -OUT_OF_TRAVEL_MARGIN || angle > span() + OUT_OF_TRAVEL_MARGIN;
+            }
+            if (stepDt > 0.25 || Math.abs(measuredSpeed) > OBSERVER_RESET_RATE) {
+                if (homed) {
+                    RobotLog.ww("BioBuzzTurret",
+                            "Large encoder step accepted (observer reset): ticks=%d home=%d delta=%+.1f deg dt=%.0f ms",
+                            ticks, homeTick, Math.toDegrees(change), 1000 * stepDt);
+                    observer.reset(angle, 0);
+                    pid.reset();
+                }
+                speed = 0;
+                return;
+            }
+            speed += stepDt / (0.026 + stepDt) * (measuredSpeed - speed);
+            if (homed) {
+                if (consecutive && stepDt <= RobotConfig.SHOT_TURRET_STILL_SECONDS
+                        && Math.max(Math.abs(measuredSpeed), Math.abs(speed)) <= RobotConfig.SHOT_TURRET_STILL_RATE) {
+                    stillSeconds = wasStillFor + stepDt;
+                }
+                int direction = Math.abs(speed) > 0.13 ? (speed >= 0 ? 1 : -1) : (appliedPower >= 0 ? 1 : -1);
+                double drag = frictionDuty(angle, direction, speed);
+                if (Math.abs(speed) < 0.13) drag = Math.min(drag, Math.abs(appliedPower));
+                observer.update(angle, speed, stepDt, appliedPower, direction * drag,
+                        plant.kV(direction), plant.timeConstant(direction));
+            }
         } catch (RuntimeException unavailable) {
-            // The next loop tries again with the same encoder origin.
+            // The next loop keeps accumulating encoderAge and continues cleanly from lastTick.
         }
     }
 
@@ -258,9 +387,10 @@ public final class Turret {
         double goalRate = goalNumber == 0 ? 0 : Maths.clip(lineRate, -5, 5);
         double relativeRate = goalRate - pose.yawRate;
         int toward = relativeRate >= 0 ? 1 : -1;
-        double lookahead = Maths.clip(0.23 + plant.delay(toward), 0.24, 0.36);
+        double lookahead = Maths.clip(0.08 + 0.5 * plant.delay(toward), 0.08, 0.16)
+                * Math.max(0.0, RobotConfig.TURRET_REWIND_LOOKAHEAD_SCALE);
         boolean wasRewinding = range.rewinding;
-        double lead = Maths.clip(goalRate * plant.delay(toward), -Math.toRadians(5), Math.toRadians(5));
+        double lead = Maths.clip(goalRate * plant.delay(toward), -Math.toRadians(10), Math.toRadians(10));
         target = range.target(stabilized + correction + lead, angle, relativeRate, lookahead);
         worldError = Maths.wrap(worldBearing + yawTrim - actualBearing);
         if (range.rewinding != wasRewinding) {
@@ -320,8 +450,8 @@ public final class Turret {
         double error = targetAngle - observer.angle;
         boolean quiet = Math.abs(targetRate) < 0.075 && Math.abs(anticipatedRate) < 0.10
                 && Math.abs(chassisAcceleration) < 0.7;
-        boolean within = Math.abs(targetAngle - angle) < Math.toRadians(holding ? 0.85 : 0.38)
-                && Math.abs(speed) < (holding ? 0.16 : 0.075);
+        boolean within = Math.abs(targetAngle - angle) < Math.toRadians(holding ? 1.40 : 0.90)
+                && Math.abs(speed) < (holding ? 0.22 : 0.14);
         holding = quiet && within;
         if (holding) {
             pid.reset();

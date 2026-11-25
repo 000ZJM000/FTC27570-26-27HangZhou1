@@ -145,20 +145,24 @@ final class TurretBench {
 
     static StepResult step(CalibrationOp op, Turret turret, double target, String label)
             throws InterruptedException {
-        return step(op, turret, target, label, 2.35, false, true);
+        return step(op, turret, target, label, 2.35, 0, Math.toRadians(8), true);
     }
 
     static StepResult pidStep(CalibrationOp op, Turret turret, double target, String label, boolean longMove,
                               boolean verification) throws InterruptedException {
-        return step(op, turret, target, label, longMove ? 2.45 : 1.55, !verification, false);
+        double delta = Math.abs(target - turret.angle);
+        double hardOvershoot = Maths.clip(0.48 * delta, Math.toRadians(10), Math.toRadians(24));
+        return step(op, turret, target, label, longMove ? 2.65 : 1.85,
+                0.36, hardOvershoot, false);
     }
 
     private static StepResult step(CalibrationOp op, Turret turret, double target, String label, double duration,
-                                   boolean pidSearch, boolean baseline) throws InterruptedException {
+                                   double settleHold, double hardOvershootLimit, boolean baseline)
+            throws InterruptedException {
         double initial = turret.angle;
         double delta = target - initial;
         double direction = Math.copySign(1, delta);
-        StepResult result = new StepResult(duration);
+        StepResult result = new StepResult(duration, hardOvershootLimit);
         double scale = direction * Math.max(Math.toRadians(2), Math.abs(delta));
         try {
             op.runFor(duration, (time, dt) -> {
@@ -177,7 +181,7 @@ final class TurretBench {
                 result.endError = error;
                 result.endSpeed = turret.speed;
                 result.overshoot = Math.max(result.overshoot, -direction * error);
-                if (result.overshoot > Math.toRadians(8)) {
+                if (result.overshoot > hardOvershootLimit) {
                     result.unsafe = true;
                     return false;
                 }
@@ -191,15 +195,21 @@ final class TurretBench {
                 } else {
                     result.quiet = 0;
                 }
+                if (direction * error <= Math.toRadians(2.5)) {
+                    result.enteredTarget = true;
+                }
+                if (result.enteredTarget && Math.abs(turret.speed) >= Math.toRadians(8)) {
+                    result.postArrivalTravel += Math.abs(turret.speed) * dt;
+                }
                 turret.control(target, 0, dt);
                 result.peakPower = Math.max(result.peakPower, Math.abs(turret.output()));
                 result.response.sample(time, dt, 1 - error / scale, turret.output(),
                         Math.abs(error) <= RobotConfig.SHOT_AIM_TOLERANCE
-                        && Math.abs(turret.speed) <= Math.toRadians(15));
+                        && Math.abs(turret.speed) <= Math.toRadians(24));
                 op.show(label, "误差 %+.2f°，速度 %+.0f°/s，功率 %+.2f / 峰值 %.2f",
                         Math.toDegrees(error), Math.toDegrees(turret.speed), turret.output(), result.peakPower);
                 if (baseline && result.quiet >= 0.40 && result.stable()) return false;
-                return !pidSearch || !result.response.finishIfSettled(0.36);
+                return !(settleHold > 0) || !result.response.finishIfSettled(settleHold);
             });
         } finally { turret.stop(); }
         return result;
@@ -207,11 +217,15 @@ final class TurretBench {
 
     static final class StepResult {
         final StepScore response;
-        double overshoot, quiet, endError, endSpeed, peakPower;
+        final double hardOvershootLimit;
+        double overshoot, quiet, endError, endSpeed, peakPower, postArrivalTravel;
         int lastDirection, reversals;
-        boolean unsafe, limitReached, readFailed;
+        boolean unsafe, limitReached, readFailed, enteredTarget;
 
-        StepResult(double duration) { response = new StepScore(duration); }
+        StepResult(double duration, double hardOvershootLimit) {
+            response = new StepScore(duration);
+            this.hardOvershootLimit = hardOvershootLimit;
+        }
 
         boolean stable() {
             return !unsafe && !readFailed && quiet >= HOLD && overshoot <= OVERSHOOT_LIMIT && reversals <= 1;

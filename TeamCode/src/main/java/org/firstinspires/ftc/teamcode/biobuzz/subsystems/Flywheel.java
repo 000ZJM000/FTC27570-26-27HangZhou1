@@ -12,26 +12,26 @@ import org.firstinspires.ftc.teamcode.biobuzz.core.BatteryVoltage;
 import org.firstinspires.ftc.teamcode.biobuzz.core.ControlLoop;
 import org.firstinspires.ftc.teamcode.biobuzz.core.Maths;
 
-/** Dual-motor flywheel with 12 V quadratic feedforward, light PI, and asymmetric Bang-Bang recovery. */
+/** Dual-motor flywheel with 12 V quadratic feedforward and continuous closed-loop PID. */
 public final class Flywheel {
-    private static final double[] DEFAULT_PID = {1.6, 0.30, 0.0};
-    private static final double BOOST_ENTER_RPM = 120;
-    private static final double BOOST_EXIT_RPM = 50;
-    private static final double OVERSPEED_COAST_RPM = 180;
+    private static final double[] DEFAULT_PID = {2.2, 1.4, 0.01};
+    private static final double INTEGRAL_LIMIT = 0.25;
+    private static final double TARGET_RESET_RPM = 800;
     private static final double COLD_START_SECONDS = 0.40;
     private static final double OPEN_LOOP_STALL_VOLTS = 4.5;
     private final DcMotorEx m7, m8;
     private final Servo blocker;
     private final BatteryVoltage battery;
     private final String pidSource;
+    private final boolean savedPid;
     private final boolean voltageModelCalibrated;
     private double[] gains;
     private Maths.Pid pid;
-    private final double[] model;
+    private double[] model;
     public final double ticksPerRev;
     private double lastSampleTime = Maths.time(), lastMotion = lastSampleTime;
     private double acceleration, sampleDt, coldStartedAt = Double.NaN;
-    private boolean fault, stallWatchdogArmed, boosting;
+    private boolean fault, stallWatchdogArmed;
     public double speed, target, output;
 
     public Flywheel(HardwareMap map, CalibrationStore store) {
@@ -61,8 +61,21 @@ public final class Flywheel {
         voltageModelCalibrated = hasVoltageModel;
         model = validModel(curve) ? curve : null;
         ticksPerRev = store.read(CalibrationStore.FLYWHEEL_SCALE, RobotConfig.FLYWHEEL_TICKS_PER_WHEEL_REV)[0];
-        pidSource = "12V 前馈 + 轻 PI + Bang-Bang";
-        setPidGains(DEFAULT_PID);
+        double[] voltagePid = store.readExact(CalibrationStore.FLYWHEEL_VOLTAGE_PID, 3);
+        double[] legacyPid = validPid(voltagePid) ? null : store.readExact(CalibrationStore.FLYWHEEL_PID, 3);
+        if (validPid(voltagePid)) {
+            savedPid = true;
+            pidSource = "04 实测 12V PID";
+            setPidGains(voltagePid);
+        } else if (validPid(legacyPid)) {
+            savedPid = true;
+            pidSource = "历史 PID";
+            setPidGains(legacyPid);
+        } else {
+            savedPid = false;
+            pidSource = "12V 默认 PID";
+            setPidGains(DEFAULT_PID);
+        }
     }
 
     public static boolean validModel(double[] curve) {
@@ -87,22 +100,36 @@ public final class Flywheel {
     public Direction encoderDirection() { return m8.getDirection(); }
     public boolean rpmCalibrated() { return model != null && ticksPerRev > 0; }
     public boolean voltageModelCalibrated() { return voltageModelCalibrated; }
+    public boolean usesSavedPid() { return savedPid; }
     public boolean faulted() { return fault; }
-    public boolean boosting() { return boosting; }
     public String pidSource() { return pidSource; }
     public double[] pidGains() { return gains.clone(); }
+    public double acceleration() { return acceleration; }
+    public double[] voltageModel() { return model == null ? null : model.clone(); }
     public double integralVolts() { return BatteryVoltage.NOMINAL_VOLTS * pid.integralDuty(); }
+
+    public void setVoltageModel(double[] curve) {
+        if (!validModel(curve)) throw new IllegalArgumentException("Invalid flywheel voltage model");
+        model = curve.clone();
+    }
+
+    public void pulseCoast() {
+        ControlLoop.safeStop(RobotConfig.FLYWHEEL_LEFT, () -> m7.setPower(0));
+        ControlLoop.safeStop(RobotConfig.FLYWHEEL_ENCODER_MOTOR, () -> m8.setPower(0));
+        output = 0;
+        stallWatchdogArmed = false;
+    }
 
     public void setPidGains(double[] gains) {
         if (!validPid(gains)) throw new IllegalArgumentException("Invalid flywheel PID");
         this.gains = gains.clone();
-        pid = new Maths.Pid(this.gains);
+        pid = new Maths.Pid(this.gains, INTEGRAL_LIMIT);
     }
 
-    private static boolean validPid(double[] gains) {
+    public static boolean validPid(double[] gains) {
         return gains != null && gains.length == 3 && Maths.finite(gains)
-                && gains[0] >= 0 && gains[0] <= 4.5 && gains[1] >= 0 && gains[1] <= 4
-                && gains[2] >= 0 && gains[2] <= 0.15
+                && gains[0] >= 0 && gains[0] <= 6.0 && gains[1] >= 0 && gains[1] <= 6.0
+                && gains[2] >= 0 && gains[2] <= 0.25
                 && (gains[0] > 0 || gains[1] > 0 || gains[2] > 0);
     }
 
@@ -177,16 +204,14 @@ public final class Flywheel {
         }
         boolean starting = target <= 0 && rpm() < 200;
         double nextTarget = Maths.clip(rpm, 0, maxTargetRpm()) * ticksPerRev / 60;
-        if (target <= 0 || Math.abs(nextTarget - target) > ticksPerRev * 250 / 60) {
+        if (target <= 0 || Math.abs(nextTarget - target) > ticksPerRev * TARGET_RESET_RPM / 60) {
             pid.reset();
-            boosting = false;
         }
         target = nextTarget;
         if (starting) coldStartedAt = Maths.time();
         if (sampleDt <= 0) return;
         double dt = Math.min(sampleDt, 0.05);
         sampleDt = 0;
-        double errorRpm = 60 * (target - speed) / ticksPerRev;
         double available = battery.nominal(RobotConfig.FLYWHEEL_MAX_POWER);
         boolean coldStarting = false;
         if (Double.isFinite(coldStartedAt)) {
@@ -197,29 +222,10 @@ public final class Flywheel {
                 available = Math.min(available, battery.nominal(progress * RobotConfig.FLYWHEEL_MAX_POWER));
             }
         }
-        if (coldStarting) {
-            boosting = false;
-            double command = pid.update((target - speed) / model[0],
-                    Maths.clip(acceleration / model[0], -1.5, 1.5),
-                    feedforwardVolts() / BatteryVoltage.NOMINAL_VOLTS, dt, 0, available);
-            writeVolts(BatteryVoltage.NOMINAL_VOLTS * command);
-            return;
-        }
-        if (errorRpm > BOOST_ENTER_RPM) boosting = true;
-        else if (errorRpm <= BOOST_EXIT_RPM) boosting = false;
-
-        if (boosting) {
-            pid.reset();
-            writePower(RobotConfig.FLYWHEEL_MAX_POWER);
-        } else if (errorRpm < -OVERSPEED_COAST_RPM) {
-            pid.reset();
-            writePower(0);
-        } else {
-            double command = pid.update((target - speed) / model[0],
-                    Maths.clip(acceleration / model[0], -1.5, 1.5),
-                    feedforwardVolts() / BatteryVoltage.NOMINAL_VOLTS, dt, 0, available);
-            writeVolts(BatteryVoltage.NOMINAL_VOLTS * command);
-        }
+        double command = pid.update((target - speed) / model[0],
+                Maths.clip(acceleration / model[0], -1.5, 1.5),
+                feedforwardVolts() / BatteryVoltage.NOMINAL_VOLTS, dt, 0, available, !coldStarting);
+        writeVolts(BatteryVoltage.NOMINAL_VOLTS * command);
     }
 
     public void powerVolts(double volts, double dt) {
@@ -255,7 +261,6 @@ public final class Flywheel {
         ControlLoop.safeStop(RobotConfig.FLYWHEEL_ENCODER_MOTOR, () -> m8.setPower(0));
         target = output = sampleDt = acceleration = 0;
         stallWatchdogArmed = false;
-        boosting = false;
         coldStartedAt = Double.NaN;
         pid.reset();
     }

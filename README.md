@@ -4,7 +4,7 @@ FTC 27570 在 2026–2027 BIOBUZZ 赛季使用的机器人控制程序。项目�
 
 - **比赛主控** · Driver Station → TeleOp → **BIOBUZZ → Biobuzz角落出发**，统一使用对称角落模式
 - **实时调参** · FTC Dashboard → **RobotConfig**，调整跑打、微调步长、自动等待和 Pedro 参数
-- **自动路线** · Driver Station → Autonomous → **BIOBUZZ Pedro 吸两组设三组2T**，执行 8 段路径与机构动作
+- **自动路线** · Autonomous → **BIOBUZZ Pedro 吸两组设三组2T**（9 段）或 **BIOBUZZ Pedro 等待后打预制Park**（2 段）
 - **硬件自测** · Driver Station → TeleOp → **BIOBUZZ 自测**，首次运行 **02 云台全套 → 04 飞轮校准**
 - **射击标定与查看** · 完成硬件自测后运行 **06 半场射击校准·数据**，START 后按 **L3** 切换数据查看
 - **转向标定** · Driver Station → TeleOp → **BIOBUZZ 自测 → 07 转向摇杆线性校准**
@@ -27,11 +27,12 @@ FTC 27570 在 2026–2027 BIOBUZZ 赛季使用的机器人控制程序。项目�
 
 APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 
-`TeamCode/build.gradle` 已配置 WAV、MP3、OGG 音频资源无压缩打包，并集成 FTC Dashboard 0.6.0 与 PedroPathing `com.pedropathing:revhub:3.0.0`。构建任务 `copyPedroRoute` 自动打包以下两份源文件，修改后重新构建并安装 APK。首次同步需能访问依赖仓库。
+`TeamCode/build.gradle` 已配置 WAV、MP3、OGG 音频无压缩打包，并集成 FTC Dashboard 0.6.0 与 PedroPathing `com.pedropathing:revhub:3.0.0`。`copyPedroRoute` 自动打包以下三份文件，修改后重新构建并安装 APK。首次同步需能访问依赖仓库。
 
 | 仓库源文件 | APK 中的位置 |
 | --- | --- |
 | [PP/吸两组设三组2T-3.json](PP/吸两组设三组2T-3.json) | `assets/pedro/two-group-route.json` |
+| [PP/等待后打预制park.json](PP/等待后打预制park.json) | `assets/pedro/wait-shoot-park-route.json` |
 | [测点/shot_model.json](测点/shot_model.json) | `assets/biobuzz/shot_model.json` |
 
 `config/RobotConfig.java` 已启用 Dashboard `@Config`。运行时可查看控制频率、位姿、云台角度及电压、飞轮转速等遥测。可调项是该类中未声明为 `final` 的公开静态字段，硬件标定仍由自测保存到 `calibration.json`。
@@ -52,9 +53,10 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | 挡弹与俯仰舵机 | `SB`、`ST` | Control Hub 舵机 0、Expansion Hub 舵机 1 |
 | 任务舵机（成对使用） | `FR`、`FL` | 按实车接线设置 Hub 与端口，代码未固定端口 |
 | goBILDA Pinpoint | `pinpoint` | Expansion Hub 2 I²C Bus 1，接两个里程轮 |
+| 航向备援 | `imu` | Control Hub 内置 IMU，默认 Logo 朝车右、USB 朝上，安装方向在 `RobotConfig` 设置 |
 | KIRIN V3 尾灯（可选） | `LED` | 接线所用 I²C 总线，设备类型选 **STM32 Smart LED Module V3** |
 
-飞轮方向以 04 保存的结果为准。Pinpoint 使用 FTC SDK 的 goBILDA 4-Bar 里程轮预设，机械尺寸与安装方向集中在 `RobotConfig.java`。FR/FL 初始化和收回位置为 **0.94 / 0.06**，放下为 **0.00 / 1.00**，需两只均配置才执行切换。
+飞轮方向以 04 保存的结果为准。Pinpoint 使用 FTC SDK 的 goBILDA 4-Bar 里程轮预设。吸取放下位置 SL/SR 为 **0.95 / 0.035**，抬起为 **0.825 / 0.16**。FR/FL 的 INIT 位置为 **0.855 / 0.155**，START 后收回到 **0.98 / 0.055**，放下为 **0.00 / 1.00**，需两只均配置才切换。
 
 ## 第一次上车
 
@@ -63,16 +65,16 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | 用途 | Driver Station 名称 | 自测内容 |
 | --- | --- | --- |
 | 云台全套 | **02 云台全套 12V补偿·联动·PID** | 行程与方向、动力学、六点双向静／动摩擦、底盘联动、PID 与回转验收 |
-| 飞轮校准 | **04 飞轮校准 12V前馈·三球回速** | 转向与每转计数、七档空载电压前馈拟合，可选三球实弹回速 |
+| 飞轮校准 | **04 飞轮校准 12V前馈·PID·回速** | 方向与每转计数、8 档电压前馈及闭环校验、PID 搜索与留出复测、可选三球回速 |
 | 单项复测 | **03 云台专项 12V联动补偿** | 使用现有行程与动力学，单独重测底盘联动 |
 | 快检或重调 | **05 云台专项 12V PID·回转** | 使用现有行程与摩擦，单独运行 30 秒快检或完整 PID 拟合 |
 | 转向手感 | **07 转向摇杆线性校准** | 自动测左右起转死区、七档旋转速度，生成转向映射并复测 |
 
-首次校准运行 **02 → 04**。02 可在已有有效标定基础上，分阶段选择重测或沿用动力学、摩擦表、底盘联动和云台 PID。执行联动与回转前按提示让轮子落地、腾出旋转空间。04 按提示识别飞轮方向、测每转计数并扫描七档 3–12 V 前馈，之后可进行三球回速测试。
+首次校准运行 **02 → 04**。02 可分阶段重测或沿用几何、动力学、摩擦、联动与 PID。04 可沿用方向与每转计数，扫描 **3、4.5、6、7.2、8.4、9.6、10.8、12 V** 八档前馈并做闭环校验，再选择 PID 贝叶斯搜索、留出复测与稳态对比，最后可进行三球回速。各阶段按屏幕提示选择。
 
 02 从静止缓升电压测起转阈值，再用独立匀速行程测动摩擦。定位无进展时沿目标方向缓升电压重测起转，受行程和安全电压限制。未检测到起转的位置按缺测处理，可换偏置角补测。结果分别显示静摩擦、动摩擦的左右有效点数。覆盖不足时沿用旧表，反馈正常时继续后续联动与 PID 校准。
 
-飞轮调速使用 12 V 前馈、固定轻量 PI 和带滞回的 Bang-Bang 补电，默认 P/I/D 为 **1.6 / 0.30 / 0**。冷启动软起动约 **400 ms**，工作段掉速超过 **120 RPM** 时满功率补电，偏差回到 **50 RPM** 内结束补电。超速超过 **180 RPM** 时空转滑行。INIT 若提示使用旧占空比曲线，可运行 04 重测 12 V 前馈。
+飞轮调速使用 **12 V 二次前馈 + 连续闭环 PID**。优先读取 04 保存的 12 V PID，其次使用历史 PID，均无有效数据时默认 **P/I/D = 2.2 / 1.4 / 0.01**，冷启动软起动约 **400 ms**。INIT 显示实际加载的来源和值；旧占空比曲线仍可读取，可通过 04 重测前馈和 PID。
 
 飞轮开环扫描的低压起转阶段单独处理失转计时。编码器长时间无运动或读取异常时，`BioBuzzFlywheel` 日志记录故障，失转记录包含实际输出电压、电池电压和目标 RPM。
 
@@ -107,17 +109,19 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 | 06 手柄 1 | 操作 |
 | --- | --- |
 | 方向键 | 格心模式选列、选行，四角模式用左 / 右切换测点 |
-| LB / RB | 目标转速每按一次减 / 加 25 RPM |
+| LB / RB | 目标转速减 / 加 `G2_RPM_FINE_STEP`，默认每次 25 RPM |
 | X | 云台刹车或松开，以便手摆方向 |
 | R3 | 按当前模型预瞄选中点，B 取消 |
 | L3 | 空闲时切换试射与数据查看 |
-| RT | 单次试射，云台停稳、飞轮到速后供弹 0.65 秒 |
+| RT（按住） | 锁住当前云台角，飞轮从零起转，达速稳定后持续供弹；松开关闭供弹并停飞轮 |
 | A | 确认命中后保存本点最近完成的试射 |
 | Y | 标记本点不可达，或解除标记 |
 | B | 取消本次试射 |
 | Back | 空闲时切换格心与四角精测 |
 
-每次装一颗球，车头朝场地正前方，格心模式将麦轮中心摆在格心。四角精测按屏幕提示，将车身指定角对准地垫同名角，两条车身边沿着接缝，整车放在该地垫内。程序根据车身尺寸换算实际测点坐标，保存供弹开始时的射向、目标 RPM、电池电压和 ST 舵机位置。有新版四角记录的格子会自动停用旧精测。
+每次装一颗球，按屏幕提示摆车和瞄准。06 平时保持飞轮停转，按住 RT 后锁住云台，等待目标转速 **±3.5%（最小 50 RPM）内连续 120 ms** 才首次放行，等待上限 **6 秒**。松开 RT 停止供弹和飞轮，保留本次已完成试射，确认命中后按 A 保存。四角测点按车身指定角对齐地垫角，程序换算实际坐标。保存供弹首次放行时的射向、目标 RPM、电压与 ST 位置。
+
+06 也支持副手操作：方向键上 / 下调 RPM，左 / 右微调云台，LB / RB 大幅微调，A 回正前，B 启动或取消右端寻零。微调步长与比赛主控共用 `G2_*` 参数，试射过程中先松开 RT 再调整。
 
 在 **06 半场射击校准·数据** 中，START 后空闲时按 **L3** 进入数据查看，浏览两个半场的格心、四角与旧精测。方向键左 / 右翻页，**A** 切换已记录和全部点位，**X** 切换密集列表与坐标详情，**Y** 重新导出 `shot_records.json`，**L3** 或 **B** 返回试射。密集模式每行最多 3 个点、每页最多 10 行，详情每页 3 个点。进入 START、保存测点和变更不可达标记时也会自动导出记录。
 
@@ -156,33 +160,40 @@ APK 输出到 `TeamCode/build/outputs/apk/debug/TeamCode-debug.apk`。
 
 ## Pedro 自动路线
 
-Driver Station → Autonomous → **BIOBUZZ Pedro 吸两组设三组2T**。使用 PedroPathing 3.0.0 的 Follower、Foresight 和麦轮驱动，定位由现有 Pinpoint 提供，自动与角落主控共用射界查询和供弹判定。
+自动与手动共用 Pinpoint、射界模型、云台和供弹联锁。Driver Station 的 Autonomous 提供两套入口，路线源文件与打包关系见 [PP/README.md](PP/README.md)。
 
-当前打包路线为 [PP/吸两组设三组2T-3.json](PP/吸两组设三组2T-3.json)，共 **8 段**。Gradle 的 `copyPedroRoute` 将它生成为 APK 内的 `pedro/two-group-route.json`。覆盖源文件后重新构建并安装 APK，INIT 时加载更新。其他两份 PP 文件为 7 段存档，现有机构流程要求 8 段。格式与更新方式见 [PP/README.md](PP/README.md)。
+| 自动名称 | 当前路线 | 流程 |
+| --- | --- | --- |
+| **BIOBUZZ Pedro 吸两组设三组2T** | `吸两组设三组2T-3.json`，9 段 | 三次射击、吸取、FR/FL 机构动作与停靠 |
+| **BIOBUZZ Pedro 等待后打预制Park** | `等待后打预制park.json`，2 段 | 第 1 段后等待，最后 2 秒请求射击，随后执行 Park |
 
-1. 按 INIT 显示的 PP 起点 X、Y 和车头角摆车，单位为英寸。起始航向取第 1 段的 Heading，场地图上 0° 朝右、90° 朝上、180° 朝左、270° 朝下。自动 INIT 会清空上一轮接续状态。
-2. 保持底盘静止，让自动初始化 Pinpoint，将云台轻摆到最右端。INIT 会抬起 SL/SR、关闭 SB、设置 ST，并将 FR/FL 置于 `0.94 / 0.06`。
-3. 按 START 采云台零位并执行路线，屏幕显示路径、定位、射界来源和射击状态。
+按 INIT 显示的起点 X、Y 和车头角摆车，坐标单位为英寸。起始航向取第 1 段 Heading，图上 0° 朝右、90° 朝上、180° 朝左、270° 朝下。保持底盘静止，让 Pinpoint 初始化并设置起点，按提示确认云台右端零位，再按 START。
 
-| 路径阶段 | 机构动作 |
+主路线的机构阶段如下，PP 段数或顺序变更需同步调整程序。
+
+| 阶段 | 机构动作 |
 | --- | --- |
-| 第 1、3 段后等待 | 原地自瞄，按供弹判定尝试连续射击 |
-| 第 2 段及其段后等待 | 放下 SL/SR 吸取，等待结束后停止并抬起 |
-| 第 4 段到位 | 放下 FR/FL，至少等待 180 ms |
-| 第 5–7 段 | 持续吸取，第 7 段后抬 SL/SR，再原地自瞄射击 |
-| 第 8 段 | 停止飞轮与云台输出，行驶过半收回 FR/FL |
+| 第 1、4、8 段后 | 原地自瞄射击，第 4 段后先等待默认 0.30 秒 |
+| 第 2 段及其等待 | 持续吸取，等待结束后停吸 |
+| 第 5 段后 | 放下 FR/FL，至少等待默认 0.45 秒 |
+| 第 6 段 | 持续吸取，段末执行 3 组默认 0.20 秒后退、1.00 秒前推，输出 0.70 |
+| 第 7 段后 | 保持吸取并收回 FR/FL |
+| 第 8 段后 | 停吸，射击结束后关闭射击状态 |
+| 第 9 段 | 停靠 |
 
-每轮射击按累计实际供弹计时，默认达到 **0.90 秒** 后收闸，并至少保留 PP 原定等待。请求供弹的截止时间为原定等待与目标供弹时间中的较大值，再加默认 **1.00 秒**。两项分别由 Dashboard 的 `AUTO_VOLLEY_FEED_SECONDS`、`AUTO_VOLLEY_MAX_EXTRA_SECONDS` 调整。射界模型不可用时使用几何自瞄与默认转速，供弹仍经过机构与禁射区判定。
+自动默认至少预热 **0.60 秒**，转速达标连续 **0.10 秒** 后才首次放行。每轮累计实际供弹默认 **0.90 秒**，并保留路线等待，请求截止时间为原等待与目标供弹时间中的较大值再加 **1.50 秒**。参数分别为 `AUTO_STARTUP_SPINUP_SECONDS`、`AUTO_RPM_SETTLE_SECONDS`、`AUTO_VOLLEY_*`。
 
-未到位且平移低于 **0.5 in/s**、转向低于 **4°/s** 连续 **1.5 秒** 时，刹车后跳过该段，再从实测位姿接下一段。这些阈值由 `AUTO_STALL_*` 调整。第 1、3、7 段超时后仍尝试射击，第 4 段需到位才放下 FR/FL。Pinpoint 短暂失读时刹车等待，持续失效约 **250 ms** 时停止自动。路线与控制参数仍需实车确认。
+等待后 Park 路线当前第 1 段等待合计 **10 秒**。到达该段末端后，先静候 8 秒，再用最后 2 秒请求射击，达速等待受上述截止时间限制。随后关闭射击并执行后续 Park 路段。
 
-自动运行中持续记录位姿与云台右端零位编码器计数。结束或中途 STOP 后保持机器人通电，接续状态有效时可直接 INIT/START 手动，沿用 Pinpoint 当前坐标和云台零位。`RobotStateStorage` 使用程序内存保存这些数据，Robot Controller 应用重启或整机掉电后需要重新确认摆位与零位。
+未到位且平移低于 **0.5 in/s**、转向低于 **4°/s** 连续 **1.5 秒** 时跳过当前段，从实测位姿接下一段。第 6 段开环动作后也从实测位姿重新衔接。Pinpoint 持续失效约 **250 ms** 时停止自动，航向备援提供的航向不替代自动所需的平移定位。
+
+自动运行中记录位姿与云台零位，结束或中途 STOP 后可在通电状态下切手动。接续数据使用当前 Robot Controller 进程内存，应用重启或整机掉电后需重新确认摆位和零位。
 
 ## 比赛操控
 
 ### INIT 与自动接续
 
-统一选择 **BIOBUZZ → Biobuzz角落出发**。自动接续有效时，手动通过 `PinpointPose.attachExisting()` 使用传感器当前位姿，不重校 IMU，并继承云台右端零位。INIT 核对当前位姿和云台接续状态，再按 START。
+统一选择 **BIOBUZZ → Biobuzz角落出发**。有效自动状态可接续位姿，自动或上轮手动的有效云台计数可接续零位。INIT 会核对计数合理性，检测到疑似编码器掉电归零时提示重新摆右端。INIT 按 **B** 可放弃继承并重新摆到右端采零。
 
 直接单测手动时，INIT 前把车放回发车角、车头朝原正前方，将云台轻摆到最右端。START 时记录云台零位并对齐角落坐标。定位偏移后，把车回到同一手动角及朝向，再由主手或副手按 **Y** 重置场地坐标和无头偏置。
 
@@ -210,31 +221,36 @@ Driver Station → Autonomous → **BIOBUZZ Pedro 吸两组设三组2T**。使�
 | 方向键左 / 右 | 云台角度左偏 / 右偏 `G2_YAW_FINE_DEG`，默认 0.5° |
 | LB / RB | 云台角度左偏 / 右偏 `G2_YAW_LARGE_DEG`，默认 5° |
 | A | 切换云台回正前零位并锁定，再按一次恢复跟踪 |
+| B | 启动右端轻推寻零，再按取消；期间暂停供弹 |
 | X | 清零云台角度与飞轮转速微调 |
 | Y | 与主手 Y 相同，回角落重置坐标 |
 | R3 | 切换云台解耦 |
 
-副手 A 锁定时，RT 等待云台回正或停稳后再按其余条件放行。解耦时云台停止输出，RT 跳过角度等待，仍受禁射、飞轮和供弹机构条件限制。回角定位、无头归零、瞄准就绪和发射等操作带手柄震动提示，副手锁定零位时尾灯显示冰白色。
+副手 A 锁定时，RT 等待云台回正或停稳后再按其余条件放行。副手 B 寻零通过右端停稳判断记录零位，超时 **4.5 秒** 或反馈不可用时停止，可再次按 B 取消。成功后更新零位并恢复跟踪。解耦仍由 R3 或 Back+R3 切换。回角定位、瞄准和发射等操作带手柄震动提示。
 
 ### Pinpoint 诊断
 
 启动 **goBILDA Pinpoint Example**，INIT 时保持底盘静止，START 后用左摇杆平移、右摇杆横向转向。屏幕显示位置、速度、原始编码器计数、坏读次数和最近异常，异常同时写入 Robot Controller 日志。停稳后按 **A** 将位姿归零并重校 IMU，按 **B** 仅重校 IMU。
 
-主控使用 Pinpoint 全量位置、航向、编码器及原生速度寄存器。`ControlLoop` 每帧清除 Hub 缓存，主控和自动按实际 `dt` 运行，校准测量仍可使用 15 ms 周期。I²C 失读后的重试间隔从 50 ms 延长至 500 ms，恢复后回到正常读取，并可恢复 Pinpoint 的全量读取布局。航向可用性的保留窗口为 **0.50 秒**，过期后切换车头模式。需要重新对齐时，回手动角及原朝向后按 **Y**。
+主控读取 Pinpoint 的位置、航向、编码器和原生速度寄存器。**Hub IMU 备援默认开启**：Pinpoint 正常时作为主来源，失读或异常时用 Control Hub IMU 补足航向和角速度，恢复后切回。位置仍依赖 Pinpoint 与里程轮。Dashboard 可设置 `ENABLE_HUB_IMU_BACKUP`、`HUB_IMU_LOGO_DIR`、`HUB_IMU_USB_DIR`，默认 Logo 朝右、USB 朝上；检测到与主定位转向不一致时会禁用备援并提示。诊断 OpMode 可对比两路航向与角速度。
+
+主控和自动按实际 `dt` 运行，校准保留 15 ms 周期。I²C 失读后的重试间隔为 50–500 ms，恢复后回到正常读取。没有可用备援且航向过期时切车头模式。回手动角及原朝向后按 Y 可重新对齐。
 
 ### 射界、跑打与供弹
 
 主控和自动先读取本机有效 `shot_model.json`，再读取 APK 内置模型，之后尝试从 06 测点拟合。模型均不可用时，使用 `Aiming.FieldTargets` 几何自瞄和默认转速。INIT 显示实际加载来源。当前几何保底目标是右 2、前 2.5 或右 4、前 2.5，按半场切换。
 
-`ENABLE_MOVING_LEAD` 默认 **true**。模型跑打使用实时平移速度、云台转轴偏移、机构释放延迟和松杆刹停模型计算提前量，上限 **450 mm**。默认释放延迟 **0.080 秒**，飞行时间按距离线性估算，**1000–3500 mm** 对应 **0.16–0.42 秒**。这些值与 `BRAKE_*`、`PEDRO_*` 等参数可在 Dashboard 调整。
+`ENABLE_MOVING_LEAD` 默认 **true**。提前量计入平移及云台转轴的旋转线速度，并迭代估算飞行时间。默认释放延迟 **0.140 秒**，**1000–3500 mm** 对应飞行时间 **0.34–0.78 秒**。提前量由射程与 `SOTM_MAX_LEAD_MM` 共同限幅，默认最高 **1350 mm**，`SOTM_LEAD_SCALE` 默认 1.0。相关值可在 Dashboard 调整。
+
+左右半场可分别通过 `SHOT_LEFT_YAW_OFFSET_DEG` / `SHOT_RIGHT_YAW_OFFSET_DEG` 和 `SHOT_LEFT_RPM_OFFSET` / `SHOT_RIGHT_RPM_OFFSET` 调整固定偏置。加载来源为 06 拟合时，另一半场至少补 1 个有效点可估计对称角偏置，两边各至少 6 个有效点时独立拟合。有效本机或内置模型仍优先于 06 拟合，INIT 可核对来源。
 
 禁射矩形为右 **2–4 格**、前 **2.5–3.5 格**。根据实际航向投影车身四角，定位有效且整车四角都在区内时禁射，云台继续瞄准。飞轮目标跟随射界模型并叠加微调，默认备用目标为 **3100 RPM**，受实测转速上限约束。
 
 高速直射模式默认不等待转速锁。按 RT 后，云台达到校准阈值或连续 **100 ms** 低于约 **7.45°/s**，再经机构条件判定后供弹。吸取舵机刚抬起时等待 **180 ms**，供弹输出为 **1.00**。已放行的本轮 RT 若被禁射、反转或机构故障中断，需要松开再按。
 
-开启转速锁后，在目标的 **−8% 至 +12%** 入闸，连续供弹期间低于目标 **82%** 暂停。禁射区内，或开启转速锁且松开 RT 时，飞轮使用至多 **2500 RPM** 的待机目标。正常电压下底盘输出上限为 **100%**，低于 **10.2 V** 时降至 **80%**。
+开启转速锁后，在目标的 **−8% 至 +12%** 入闸，连续供弹期间低于目标 **82%** 暂停。禁射区内，或开启转速锁且松开 RT 时，飞轮使用至多 **2500 RPM** 的待机目标。手动默认允许 **100%** 底盘输出，`ENABLE_DRIVE_LOW_VOLT_CAP` 默认 false；开启后，低于 **10.2 V** 时限制到 **80%**。`DRIVE_SLEW_ENABLED` 默认 false，转向映射可由 `ENABLE_TURN_LINEARITY` 控制。
 
-仓库的 [测点/](测点) 提供当前 46 条记录的 records 与 model，以及 35 条记录的 V1 存档。当前模型随 APK 打包，本机模型可以覆盖它。格式与交换方式见 [测点/README.md](测点/README.md)。
+仓库的 [测点/](测点) 提供当前 46 条记录的模型和 records，以及 V1、V2、V3 存档。当前 `shot_model.json` 随 APK 打包，本机模型可以覆盖它。格式与交换方式见 [测点/README.md](测点/README.md)。
 
 ## 代码入口
 
@@ -253,7 +269,8 @@ Java 源码根目录为 `TeamCode/src/main/java/org/firstinspires/ftc/teamcode/b
 | 主要文件 | 用途 |
 | --- | --- |
 | [BioBuzzTeleOp.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/opmode/BioBuzzTeleOp.java) | 对称角落手动、双手柄操作与自动状态接续 |
-| [BioBuzzPedroAuto.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/opmode/BioBuzzPedroAuto.java) / [PedroRoute.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/opmode/PedroRoute.java) | 8 段自动路线、机构流程、JSON 解析与超时处理 |
+| [BioBuzzPedroAuto.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/opmode/BioBuzzPedroAuto.java) / [BioBuzzWaitShootParkAuto.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/opmode/BioBuzzWaitShootParkAuto.java) | 9 段主自动、等待射击 Park 自动与机构流程 |
+| [PedroRoute.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/opmode/PedroRoute.java) | 两套 APK 路线的 JSON 解析 |
 | [RobotConfig.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/config/RobotConfig.java) / [RobotStateStorage.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/config/RobotStateStorage.java) | 固定硬件参数、可调参数与接续状态 |
 | [ShotMap.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/shooting/ShotMap.java) / [Aiming.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/shooting/Aiming.java) | 模型来源、记录导出、几何保底、跑打与供弹联锁 |
 | [TurretModels.java](TeamCode/src/main/java/org/firstinspires/ftc/teamcode/biobuzz/subsystems/TurretModels.java) | 云台行程、动力学、摩擦、刹车与观测模型 |

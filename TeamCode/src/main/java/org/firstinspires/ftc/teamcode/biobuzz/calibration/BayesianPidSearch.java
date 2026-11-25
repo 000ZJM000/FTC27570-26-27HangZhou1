@@ -1,5 +1,6 @@
 package org.firstinspires.ftc.teamcode.biobuzz.calibration;
 
+import com.qualcomm.robotcore.util.RobotLog;
 import org.firstinspires.ftc.teamcode.biobuzz.core.Maths;
 
 import java.util.ArrayList;
@@ -14,8 +15,8 @@ final class BayesianPidSearch {
     static final int MIN_ROUNDS = 10, MAX_ROUNDS = 16;
     static final int HISTORY_STRIDE = 6, HISTORY_ROWS = 40;
     static final int VERIFICATION_ROUNDS = 2;
-    private static final int FINALISTS = 3, RECORD_PATIENCE = 5;
-    private final double[] min, max, scale;
+    private static final int FINALISTS = 4, RECORD_PATIENCE = 5, WARMUP_OBSERVATIONS = 5;
+    private final double[] min, max, scale, safeRecoveryCenter;
     private final Random random = new Random(27270);
     private final List<Observation> data = new ArrayList<>();
     private final List<Review> reviews = new ArrayList<>();
@@ -54,24 +55,30 @@ final class BayesianPidSearch {
     static final class Review {
         final double[] gains;
         final int passed;
-        final double score, steadyError;
+        final double score, steadyError, measuredScore;
         final String firstFailure;
 
-        Review(double[] gains, int passed, double score, String firstFailure, double steadyError) {
+        Review(double[] gains, int passed, double score, String firstFailure, double steadyError, double measuredScore) {
             this.gains = gains;
             this.passed = passed;
             this.score = score;
             this.firstFailure = firstFailure;
             this.steadyError = steadyError;
+            this.measuredScore = measuredScore;
         }
 
         boolean qualified() { return passed == VERIFICATION_ROUNDS && Double.isFinite(score); }
     }
 
     BayesianPidSearch(double[] min, double[] max, double[] scale) {
+        this(min, max, scale, new double[]{0.22, 0.12, 0.72});
+    }
+
+    BayesianPidSearch(double[] min, double[] max, double[] scale, double[] safeRecoveryCenter) {
         this.min = min.clone();
         this.max = max.clone();
         this.scale = scale.clone();
+        this.safeRecoveryCenter = safeRecoveryCenter.clone();
     }
 
     List<Review> reviews() { return new ArrayList<>(reviews); }
@@ -79,6 +86,18 @@ final class BayesianPidSearch {
     Review bestCandidate() {
         return reviews.stream().skip(1).filter(Review::qualified)
                 .min(Comparator.comparingDouble(row -> row.score)).orElse(null);
+    }
+    Review bestFallbackCandidate() {
+        Review best = null;
+        for (int i = 1; i < reviews.size(); i++) {
+            Review row = reviews.get(i);
+            if (!Double.isFinite(row.measuredScore) || row.measuredScore >= 8.5) continue;
+            if (best == null || row.passed > best.passed
+                    || (row.passed == best.passed && row.measuredScore < best.measuredScore)) {
+                best = row;
+            }
+        }
+        return best;
     }
     int searchCount() { return data.size() - historyCount; }
     int historyCount() { return historyCount; }
@@ -94,25 +113,38 @@ final class BayesianPidSearch {
             throws InterruptedException {
         loadHistory(history);
         double[] baseline = normalize(existing), center = baseline;
-        double radius = 0.30, best = Double.POSITIVE_INFINITY, record = Double.POSITIVE_INFINITY;
+        double radius = 0.26, best = Double.POSITIVE_INFINITY, record = Double.POSITIVE_INFINITY;
         for (Observation row : data) {
             if (row.result.settled && row.result.margin >= 0 && row.result.cost < best) {
                 best = row.result.cost;
                 center = row.x;
             }
         }
-        int success = 0, stagnant = 0, lastRecord = 0;
+        int stagnant = 0, lastRecord = 0, gpRounds = 0;
         boolean resample = false;
         for (int round = 0, attempts = 0; round < MAX_ROUNDS && attempts < MAX_ROUNDS + 12
                 && !cancelled.getAsBoolean(); attempts++) {
-            double[] x = attempts == 0 ? baseline : resample ? sample(center, radius)
-                    : propose(center, radius, attempts % 5 == 0, cancelled);
+            boolean trySafeSeed = attempts == 1 && !data.isEmpty()
+                    && (!data.get(data.size() - 1).result.settled || data.get(data.size() - 1).result.margin < 0)
+                    && distance(safeRecoveryCenter, baseline) >= 0.04;
+            boolean usedGp = attempts > 0 && !trySafeSeed && !resample && data.size() >= WARMUP_OBSERVATIONS
+                    && data.stream().anyMatch(o -> o.result.margin >= 0);
+            double[] x = attempts == 0 ? baseline : trySafeSeed ? safeRecoveryCenter.clone()
+                    : resample ? sampleNovel(center, radius)
+                    : propose(center, radius, round, cancelled);
             if (cancelled.getAsBoolean()) return;
-            Result score = trial.test(gains(x), false, attempts % 6);
+            double[] testedGains = gains(x);
+            Result score = trial.test(testedGains, false, attempts % 6);
+            RobotLog.ii("BioBuzzCalibration",
+                    "PID search round %d (attempt %d, gp=%b): P=%.3f I=%.3f D=%.3f cost=%.3f margin=%+.3f settled=%b reason=%s",
+                    round + 1, attempts + 1, usedGp, testedGains[0], testedGains[1], testedGains[2],
+                    score == null ? Double.NaN : score.cost, score == null ? Double.NaN : score.margin,
+                    score != null && score.settled, score == null ? "cancelled" : score.reason);
             resample = !measured(score);
             if (resample) continue;
             data.add(new Observation(x, score));
             round++;
+            if (usedGp) gpRounds++;
             if (score.settled && score.margin >= 0 && score.cost < record) {
                 record = score.cost;
                 lastRecord = round;
@@ -121,59 +153,101 @@ final class BayesianPidSearch {
                 best = score.cost;
                 center = x;
                 stagnant = 0;
-                if (++success == 3) {
-                    radius = Math.min(0.55, radius * 1.4);
-                    success = 0;
-                }
-            } else if (++stagnant == 7) {
-                radius = radius < 0.13 ? 0.32 : radius * 0.65;
-                stagnant = success = 0;
+                if (round >= WARMUP_OBSERVATIONS + 2) radius = Math.min(radius, 0.20);
+            } else if (++stagnant >= 2) {
+                radius = Math.max(0.06, radius * 0.72);
+                stagnant = 0;
             }
-            if (round >= MIN_ROUNDS && Double.isFinite(record) && round - lastRecord >= RECORD_PATIENCE) break;
+            if (round >= MIN_ROUNDS && gpRounds >= 4 && Double.isFinite(record)
+                    && (round - lastRecord >= 4 || radius <= 0.08)) {
+                break;
+            }
         }
         if (cancelled.getAsBoolean() || searchCount() < MIN_ROUNDS) return;
 
         List<double[]> finalists = new ArrayList<>();
         finalists.add(baseline);
-        List<Observation> ranked = new ArrayList<>(data.subList(historyCount, data.size()));
-        ranked.sort(Comparator.comparingDouble(o -> o.result.cost));
-        for (Observation o : ranked) {
+        List<Observation> rankedCurrent = new ArrayList<>(data.subList(historyCount, data.size()));
+        rankedCurrent.sort(Comparator.comparingDouble(o -> o.result.cost));
+        for (Observation o : rankedCurrent) {
             if (!o.result.settled || o.result.margin < 0) continue;
-            if (finalists.stream().noneMatch(x -> distance(x, o.x) <= 0.035)) finalists.add(o.x);
+            if (isDistinct(finalists, o.x)) finalists.add(o.x);
             if (finalists.size() == FINALISTS) break;
+        }
+        if (finalists.size() < FINALISTS && historyCount > 0) {
+            List<Observation> rankedHistory = new ArrayList<>(data.subList(0, historyCount));
+            rankedHistory.sort(Comparator.comparingDouble(o -> o.result.cost));
+            for (Observation o : rankedHistory) {
+                if (!o.result.settled || o.result.margin < 0) continue;
+                if (isDistinct(finalists, o.x)) finalists.add(o.x);
+                if (finalists.size() == FINALISTS) break;
+            }
+        }
+        if (finalists.size() < FINALISTS && data.size() >= WARMUP_OBSERVATIONS) {
+            double[] gpOptimum = proposeFinalist(finalists, cancelled);
+            if (gpOptimum != null && isDistinct(finalists, gpOptimum)) finalists.add(gpOptimum);
+        }
+        if (finalists.size() == 1 && !rankedCurrent.isEmpty()) {
+            Observation safest = null;
+            for (Observation o : rankedCurrent) {
+                if (!isDistinct(finalists, o.x)) continue;
+                if (safest == null || o.result.margin > safest.result.margin + 1e-6
+                        || (Math.abs(o.result.margin - safest.result.margin) <= 1e-6
+                                && o.result.cost < safest.result.cost)) {
+                    safest = o;
+                }
+            }
+            if (safest != null) finalists.add(safest.x);
         }
         double[][] costs = new double[finalists.size()][VERIFICATION_ROUNDS];
         double[] steadyErrors = new double[finalists.size()];
+        Arrays.fill(steadyErrors, Double.NaN);
+        double[] measuredSum = new double[finalists.size()];
+        int[] measuredCount = new int[finalists.size()];
         int[] passed = new int[finalists.size()];
         String[] firstFailure = new String[finalists.size()];
         for (int repeat = 0; repeat < VERIFICATION_ROUNDS; repeat++) {
             for (int i = 0; i < finalists.size(); i++) {
                 if (cancelled.getAsBoolean()) return;
                 int j = (i + repeat) % finalists.size();
-                if (firstFailure[j] != null) continue;
                 double[] candidate = j == 0 ? existing.clone() : gains(finalists.get(j));
                 Result result = trial.test(candidate, true, repeat);
                 if (!measured(result) && !cancelled.getAsBoolean()) {
                     Result retry = trial.test(candidate, true, repeat);
                     if (retry != null) result = retry;
                 }
+                if (measured(result)) {
+                    measuredSum[j] += result.cost;
+                    measuredCount[j]++;
+                    if (Double.isFinite(result.steadyError)) {
+                        steadyErrors[j] = Double.isFinite(steadyErrors[j])
+                                ? Math.max(steadyErrors[j], result.steadyError) : result.steadyError;
+                    }
+                }
                 boolean pass = measured(result) && result.settled && result.margin >= 0;
                 costs[j][repeat] = pass ? result.cost : Double.POSITIVE_INFINITY;
                 if (pass) {
                     passed[j]++;
-                    steadyErrors[j] = Math.max(steadyErrors[j], result.steadyError);
                 } else if (firstFailure[j] == null) {
                     String reason = result != null && !result.reason.isEmpty() ? result.reason
                             : !measured(result) ? "无有效读数"
                             : result.margin < 0 ? "超调超限" : "未停稳";
                     firstFailure[j] = "第 " + (repeat + 1) + " 组 " + reason;
                 }
+                RobotLog.ii("BioBuzzCalibration",
+                        "PID verify finalist %d round %d: P=%.3f I=%.3f D=%.3f pass=%b cost=%.3f margin=%+.3f steady=%.4f reason=%s",
+                        j, repeat + 1, candidate[0], candidate[1], candidate[2], pass,
+                        result == null ? Double.NaN : result.cost,
+                        result == null ? Double.NaN : result.margin,
+                        result == null ? Double.NaN : result.steadyError,
+                        firstFailure[j] != null ? firstFailure[j] : "ok");
             }
         }
         for (int i = 0; i < costs.length; i++) {
             double value = passed[i] == VERIFICATION_ROUNDS ? validationScore(costs[i]) : Double.POSITIVE_INFINITY;
+            double measuredScore = measuredCount[i] > 0 ? measuredSum[i] / measuredCount[i] : Double.POSITIVE_INFINITY;
             reviews.add(new Review(i == 0 ? existing.clone() : gains(finalists.get(i)), passed[i], value,
-                    firstFailure[i], steadyErrors[i]));
+                    firstFailure[i], steadyErrors[i], measuredScore));
         }
     }
 
@@ -206,42 +280,113 @@ final class BayesianPidSearch {
         return result != null && Maths.finite(result.cost, result.margin);
     }
 
-    private double[] propose(double[] center, double radius, boolean explore, BooleanSupplier cancelled) {
-        if (data.size() < 8) {
+    private double[] propose(double[] center, double radius, int round, BooleanSupplier cancelled) {
+        if (data.size() < WARMUP_OBSERVATIONS) {
             double[] x = center.clone();
-            int direction = Math.max(0, data.size() - 1);
-            x[direction % 3] = Maths.clip(x[direction % 3] + (direction < 3 ? 0.15 : -0.15), 0, 1);
-            return distance(x, center) > 0.03 && direction < 6 ? x : sample(center, 0.18);
+            int step = Math.max(0, data.size() - 1);
+            if (step == 0) x[0] = Maths.clip(x[0] + 0.16, 0, 1);
+            else if (step == 1) x[1] = Maths.clip(x[1] + 0.16, 0, 1);
+            else if (step == 2) x[2] = Maths.clip(x[2] + 0.18, 0, 1);
+            else {
+                x[0] = Maths.clip(x[0] - 0.16, 0, 1);
+                x[2] = Maths.clip(x[2] + 0.16, 0, 1);
+            }
+            if (distance(x, center) > 0.03 && nearestDistance(x) >= 0.028) return x;
+            return sampleNovel(center, 0.22);
         }
         if (data.stream().noneMatch(o -> o.result.margin >= 0)) {
-            return sample(new double[]{0.24, 0.06, 0.25}, 0.13);
+            return sampleNovel(safeRecoveryCenter, 0.18);
         }
+        double progress = Maths.clip((round - WARMUP_OBSERVATIONS)
+                / (double) Math.max(1, MAX_ROUNDS - WARMUP_OBSERVATIONS), 0, 1);
+        boolean earlyExplore = round == WARMUP_OBSERVATIONS + 1;
+        double beta = earlyExplore ? 1.15 : (0.65 * (1.0 - progress) + 0.05 * progress);
+        double safetyBeta = earlyExplore ? 0.45 : 0.70;
+        double minSep = progress >= 0.5 ? 0.015 : 0.024;
         GaussianProcess objective = GaussianProcess.fit(data, false);
         GaussianProcess safety = GaussianProcess.fit(data, true);
-        double[] winner = center;
+        double[] winner = null;
         double bestAcquisition = Double.POSITIVE_INFINITY;
+        double[] fallback = null;
+        double bestFallback = Double.NEGATIVE_INFINITY;
         double[] work = new double[data.size()];
         for (int i = 0; i < 4096; i++) {
             if (i % 64 == 0 && cancelled.getAsBoolean()) break;
-            double[] x = sample(center, i < 192 ? Math.min(radius, 0.12) : radius);
+            double[] x = sample(center, i < 2048 ? Math.max(0.04, 0.45 * radius) : radius);
             double nearest = Double.POSITIVE_INFINITY;
             boolean nearViolation = false;
             for (Observation o : data) {
                 double separation = distance(x, o.x);
                 nearest = Math.min(nearest, separation);
-                nearViolation |= o.result.margin < 0 && separation < 0.07;
+                nearViolation |= o.result.margin < -0.05 && separation < 0.06;
             }
-            if (nearest < 0.028 || nearViolation) continue;
+            if (nearest < minSep) continue;
             double[] limit = safety.predict(x, work);
-            if (limit[0] - (explore ? 0.65 : 0.95) * limit[1] < 0) continue;
             double[] cost = objective.predict(x, work);
-            double acquisition = cost[0] - (explore ? 1.9 : 0.85) * cost[1];
+            if (nearest >= Math.max(0.02, minSep)) {
+                double feasibility = limit[0] + 0.5 * limit[1] - 0.15 * cost[0];
+                if (feasibility > bestFallback) {
+                    bestFallback = feasibility;
+                    fallback = x;
+                }
+            }
+            if (nearViolation) continue;
+            if (limit[0] - safetyBeta * limit[1] < 0) continue;
+            double acquisition = cost[0] - beta * cost[1];
             if (acquisition < bestAcquisition) {
                 bestAcquisition = acquisition;
                 winner = x;
             }
         }
+        if (winner != null) return winner;
+        return fallback != null ? fallback : sampleNovel(safeRecoveryCenter, 0.25);
+    }
+
+    private double[] proposeFinalist(List<double[]> finalists, BooleanSupplier cancelled) {
+        GaussianProcess objective = GaussianProcess.fit(data, false);
+        GaussianProcess safety = GaussianProcess.fit(data, true);
+        double[] winner = null;
+        double bestCost = Double.POSITIVE_INFINITY;
+        double[] work = new double[data.size()];
+        for (int i = 0; i < 2048; i++) {
+            if (i % 64 == 0 && cancelled.getAsBoolean()) break;
+            double[] x = {random.nextDouble(), random.nextDouble(), random.nextDouble()};
+            if (!isDistinct(finalists, x)) continue;
+            double[] limit = safety.predict(x, work);
+            if (limit[0] < 0.02) continue;
+            double[] cost = objective.predict(x, work);
+            if (cost[0] < bestCost) {
+                bestCost = cost[0];
+                winner = x;
+            }
+        }
         return winner;
+    }
+
+    private double[] sampleNovel(double[] center, double radius) {
+        double[] best = sample(center, radius);
+        double bestNearest = nearestDistance(best);
+        if (bestNearest >= 0.04) return best;
+        for (int attempt = 1; attempt < 32; attempt++) {
+            double[] candidate = sample(center, radius);
+            double nearest = nearestDistance(candidate);
+            if (nearest >= 0.04) return candidate;
+            if (nearest > bestNearest) {
+                bestNearest = nearest;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    private double nearestDistance(double[] x) {
+        double nearest = Double.POSITIVE_INFINITY;
+        for (Observation o : data) nearest = Math.min(nearest, distance(x, o.x));
+        return nearest;
+    }
+
+    private static boolean isDistinct(List<double[]> existing, double[] candidate) {
+        return existing.stream().noneMatch(x -> distance(x, candidate) <= 0.035);
     }
 
     private double[] sample(double[] center, double radius) {
@@ -261,8 +406,9 @@ final class BayesianPidSearch {
     private double[] normalize(double[] gains) {
         double[] x = new double[3];
         for (int i = 0; i < x.length; i++) {
-            x[i] = Math.log1p((Maths.clip(gains[i], min[i], max[i]) - min[i]) / scale[i])
-                    / Math.log1p((max[i] - min[i]) / scale[i]);
+            double denom = Math.max(1e-6, scale[i]);
+            x[i] = Math.log1p((Maths.clip(gains[i], min[i], max[i]) - min[i]) / denom)
+                    / Math.log1p((max[i] - min[i]) / denom);
         }
         return x;
     }
@@ -270,7 +416,8 @@ final class BayesianPidSearch {
     private double[] gains(double[] x) {
         double[] gains = new double[3];
         for (int i = 0; i < x.length; i++) {
-            gains[i] = min[i] + scale[i] * Math.expm1(x[i] * Math.log1p((max[i] - min[i]) / scale[i]));
+            double denom = Math.max(1e-6, scale[i]);
+            gains[i] = min[i] + denom * Math.expm1(x[i] * Math.log1p((max[i] - min[i]) / denom));
         }
         return gains;
     }
@@ -305,7 +452,7 @@ final class BayesianPidSearch {
             for (int i = 0; i < y.length; i++) y[i] = (y[i] - mean) / deviation;
             GaussianProcess best = null;
             for (double length : new double[]{0.10, 0.18, 0.30, 0.48, 0.75}) {
-                for (double noise : new double[]{0.04, 0.15}) {
+                for (double noise : new double[]{0.015, 0.04, 0.12}) {
                     GaussianProcess model = new GaussianProcess(data, y, mean, deviation, length, noise);
                     if (best == null || model.loss < best.loss) best = model;
                 }
