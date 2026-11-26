@@ -33,6 +33,7 @@ public final class CalibrationStore {
     public static final String TURRET_PID_STEADY_ERROR = "turret_pid_steady_error";
     public static final String TURRET_PID_HISTORY = "turret_pid_long_step_history_v5";
     public static final String TURRET_COUPLED_DYNAMICS = "turret_chassis_state_ff_v1";
+    public static final String DECODE_TURRET_PARAMS = "decode_turret_params_v1";
     public static final String FLYWHEEL_DIRECTIONS = "flywheel_directions_v1";
     public static final String FLYWHEEL_SCALE = "flywheel_scale";
     public static final String FLYWHEEL_MODEL = "flywheel_model";
@@ -222,6 +223,7 @@ public final class CalibrationStore {
         boolean plant = TURRET_PLANT.equals(key) && !Arrays.equals(values, old);
         boolean friction = TURRET_FRICTION_MAP.equals(key) && !Arrays.equals(values, old);
         if (signs && has(TURRET_PLANT)) stale.add(TURRET_PLANT);
+        if ((signs || span) && has(DECODE_TURRET_PARAMS)) stale.add(DECODE_TURRET_PARAMS);
         if ((signs || span || plant) && has(TURRET_FRICTION_MAP)) stale.add(TURRET_FRICTION_MAP);
         if (signs || span || plant || friction) {
             if (has(TURRET_PID)) stale.add(TURRET_PID);
@@ -255,6 +257,7 @@ public final class CalibrationStore {
         if (TURRET_FRICTION_MAP.equals(key)) return "02摩擦";
         if (TURRET_PID.equals(key)) return "05 PID";
         if (TURRET_COUPLED_DYNAMICS.equals(key)) return "03联动";
+        if (DECODE_TURRET_PARAMS.equals(key)) return "02B DECODE云台";
         return key;
     }
 

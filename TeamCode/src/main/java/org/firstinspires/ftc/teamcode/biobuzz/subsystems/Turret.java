@@ -17,7 +17,7 @@ import org.firstinspires.ftc.teamcode.biobuzz.subsystems.TurretModels.Plant;
 import org.firstinspires.ftc.teamcode.biobuzz.subsystems.TurretModels.Range;
 
 /** 360-degree turret controller with 12 V compensation, friction/brake feedforward, and forward-zero lock. */
-public final class Turret {
+public final class Turret implements TurretController {
     private static final double OUTPUT_LIMIT = RobotConfig.TURRET_MAX_POWER;
     private static final double OBSERVER_RESET_RATE = 38.0; // rad/s; resets observer/PID without rejecting ticks
     private static final double OUT_OF_TRAVEL_MARGIN = Math.toRadians(20.0);
@@ -430,6 +430,10 @@ public final class Turret {
     public boolean rewinding() { return range.rewinding; }
     public boolean rewindPredicted() { return range.rewinding && range.predicted; }
     public boolean targetReachable() { return range.reachable; }
+    public double angle() { return angle; }
+    public double speed() { return speed; }
+    public double target() { return target; }
+    public double worldError() { return worldError; }
     public double output() { return appliedPower; }
     public double actualDuty() { return actualDuty; }
     public double observerBias() { return observer.bias; }

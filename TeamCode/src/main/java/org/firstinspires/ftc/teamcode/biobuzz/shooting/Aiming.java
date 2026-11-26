@@ -5,7 +5,7 @@ import org.firstinspires.ftc.teamcode.biobuzz.core.Maths;
 import org.firstinspires.ftc.teamcode.biobuzz.localization.PinpointPose;
 import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Flywheel;
 import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Intake;
-import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Turret;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.TurretController;
 
 /** Field targets, SOTM lead prediction, trigger interlock sequence, and autonomous volley timer. */
 public final class Aiming {
@@ -48,7 +48,7 @@ public final class Aiming {
                     && FieldTargets.fullyInNoFireZone(pose.forward, pose.left, pose.heading);
         }
 
-        public static void track(Turret turret, PinpointPose pose, CornerAim aim, double yawTrim, double turn, double dt) {
+        public static void track(TurretController turret, PinpointPose pose, CornerAim aim, double yawTrim, double turn, double dt) {
             if (aim == null) turret.aim(pose, 0, 0, 0, yawTrim, turn, dt);
             else turret.aim(pose, aim.goal, aim.bearing, aim.lineRate, yawTrim, turn, dt);
         }
@@ -177,7 +177,7 @@ public final class Aiming {
     /** Single-press latched feeding state machine with turret / RPM / intake interlocks. */
     public static final class ShotSequence {
         private static final double IDLE_RPM = 2500;
-        private final Turret turret;
+        private final TurretController turret;
         private final Flywheel shooter;
         private final Intake intake;
         private final boolean calibratedMode;
@@ -189,7 +189,7 @@ public final class Aiming {
         private boolean startupBlocked, rpmSettled, strictMode;
         private double rpmReadySince = Double.NaN;
 
-        public ShotSequence(Turret turret, Flywheel shooter, Intake intake, boolean calibratedMode) {
+        public ShotSequence(TurretController turret, Flywheel shooter, Intake intake, boolean calibratedMode) {
             this.turret = turret;
             this.shooter = shooter;
             this.intake = intake;

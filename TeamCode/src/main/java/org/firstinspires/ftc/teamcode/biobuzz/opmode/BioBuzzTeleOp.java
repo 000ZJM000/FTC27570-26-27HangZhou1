@@ -19,6 +19,8 @@ import org.firstinspires.ftc.teamcode.biobuzz.shooting.Aiming.FieldTargets;
 import org.firstinspires.ftc.teamcode.biobuzz.shooting.Aiming.ShotMotion;
 import org.firstinspires.ftc.teamcode.biobuzz.shooting.Aiming.ShotSequence;
 import org.firstinspires.ftc.teamcode.biobuzz.shooting.ShotMap;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.DecodeTurret;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.DecodeTurretConfig;
 import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Drive;
 import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Drive.TurnLinearity;
 import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Flywheel;
@@ -48,7 +50,7 @@ public final class BioBuzzTeleOp extends LinearOpMode {
         ShotMap shotMap = new ShotMap(store);
         BatteryVoltage battery = new BatteryVoltage(hardwareMap);
         Drive drive = optional("底盘", () -> new Drive(hardwareMap));
-        Turret turret = optional("云台", () -> new Turret(hardwareMap, store, battery));
+        DecodeTurret turret = optional("云台", () -> new DecodeTurret(hardwareMap, store, battery));
         Flywheel shooter = optional("飞轮", () -> new Flywheel(hardwareMap, store, battery));
         Intake intake = optional("吸取", () -> new Intake(hardwareMap));
         TaskServos taskServos = optional("FR/FL", () -> new TaskServos(hardwareMap));
@@ -111,9 +113,8 @@ public final class BioBuzzTeleOp extends LinearOpMode {
                     }
                 }
                 showBattery(battery);
-                if (store.turretStale()) {
-                    telemetry.addLine("<font color='#ffcc33'>云台参数已过期（"
-                            + store.turretStaleSummary() + "），请重跑对应校准</font>");
+                if (store.isTurretKeyStale(CalibrationStore.DECODE_TURRET_PARAMS)) {
+                    telemetry.addLine("<font color='#ffcc33'>DECODE 云台参数已过期（几何已更改），请重跑 02B 自动调参</font>");
                 }
                 if (turretResetDetected) {
                     telemetry.addLine("<font color='#ff4444'>检测到云台编码器疑似掉电归零！请轻摆云台到最右端后再按 START</font>");
@@ -140,13 +141,16 @@ public final class BioBuzzTeleOp extends LinearOpMode {
                 }
                 if (taskServos != null) telemetry.addData("FR / FL", taskServos.status());
                 if (!lights.configured()) telemetry.addData("尾灯", "未配置 LED");
-                if (turret == null || !turret.calibrated()) telemetry.addData("云台", "先运行 02 自测");
+                if (turret == null || !turret.calibrated()) telemetry.addData("云台", "先运行 02 自测完成几何教学");
                 else {
                     telemetry.addData("云台接续", inheritedTurret && turret.isHomed()
                             ? String.format("已继承零位（当前 %+.1f° / ticks %d）", Math.toDegrees(turret.boreRelative()), turret.lastTick())
                             : String.format("待采右端（INIT 相对 %+.1f° / 跨度 %.1f°）",
                             Math.toDegrees(turret.initRelativeAngle()), Math.toDegrees(turret.span())));
                     showTurretCalibration(turret);
+                    if (!turret.hasSavedParams() && !DecodeTurretConfig.USE_DASHBOARD_FF_OVERRIDE) {
+                        telemetry.addLine("<font color='#ffcc33'>尚未运行 02B 云台 DECODE 自动调参，当前使用默认保底参数</font>");
+                    }
                 }
                 telemetry.addData("飞轮", shooter != null && shooter.rpmCalibrated()
                         ? "START 后跟随 06/模型转速，缺数据时使用默认转速"
@@ -635,7 +639,7 @@ public final class BioBuzzTeleOp extends LinearOpMode {
     }
 
     private static void publishDashboard(FtcDashboard dashboard, BatteryVoltage battery, PinpointPose pose,
-                                         Turret turret, Flywheel wheel, boolean feeding, boolean rpmLock,
+                                         DecodeTurret turret, Flywheel wheel, boolean feeding, boolean rpmLock,
                                          double loopHz) {
         TelemetryPacket packet = new TelemetryPacket();
         packet.put("loop_hz", loopHz);
@@ -652,8 +656,12 @@ public final class BioBuzzTeleOp extends LinearOpMode {
             packet.put("turret_rate_deg_s", Math.toDegrees(turret.speed));
             packet.put("turret_voltage", turret.output() * BatteryVoltage.NOMINAL_VOLTS);
             packet.put("turret_duty", turret.actualDuty());
-            packet.put("turret_brake_voltage", turret.brakeDuty() * BatteryVoltage.NOMINAL_VOLTS);
-            packet.put("turret_observer_bias", turret.observerBias());
+            packet.put("turret_brake_voltage", 0.0);
+            packet.put("turret_observer_bias", 0.0);
+            packet.put("turret_unwinding", turret.rewinding() ? 1 : 0);
+            packet.put("turret_target_vel_deg_s", turret.targetVelDegPerSec());
+            packet.put("turret_target_accel_deg_s2", turret.targetAccelDegPerSecSq());
+            packet.put("turret_brake_dist_deg", turret.brakeDistDeg());
         }
         if (wheel != null && wheel.rpmCalibrated()) {
             packet.put("flywheel_rpm", wheel.rpm());
@@ -664,7 +672,7 @@ public final class BioBuzzTeleOp extends LinearOpMode {
         dashboard.sendTelemetryPacket(packet);
     }
 
-    private static void logPose(PinpointPose pose, Turret turret, boolean idle, boolean rt, boolean firing,
+    private static void logPose(PinpointPose pose, DecodeTurret turret, boolean idle, boolean rt, boolean firing,
                                 double yawTrim) {
         RobotLog.ii("BioBuzzPose",
                 "RT=%b SB=%b idle=%b status=%s imuSrc=%s hubYaw=%+.2f hubFallbacks=%d "
@@ -679,18 +687,15 @@ public final class BioBuzzTeleOp extends LinearOpMode {
                 Math.toDegrees(yawTrim));
     }
 
-    private void showTurretCalibration(Turret turret) {
+    private void showTurretCalibration(DecodeTurret turret) {
         double[] gains = turret.pidGains();
-        double[] coupling = turret.coupling();
-        String pidSource = turret.usesSavedPid() ? "02 / 05 实测" : turret.plantIdentified() ? "02 基线" : "默认";
-        telemetry.addData("云台 PID P / I / D", "%s  %.3f / %.3f / %.3f", pidSource, gains[0], gains[1], gains[2]);
-        telemetry.addData("云台刹车模型 / 摩擦", "%s / %s", turret.plantIdentified() ? "已加载 02" : "默认",
-                turret.hasFrictionMap() ? "已加载分段表" : "方向基线");
-        telemetry.addData("云台耦合 左 / 右", "%s / %s", couplingStatus(coupling, 0), couplingStatus(coupling, 2));
-    }
-
-    private static String couplingStatus(double[] values, int side) {
-        return values[side] > 0 ? String.format("%.3f, %.3f", values[side], values[side + 1]) : "模型基线";
+        double[] ff = turret.ffPbParams();
+        telemetry.addData("云台算法", "DECODE (%s)", turret.paramsSource());
+        telemetry.addData("云台 PID P / I / D / F", "%.2f / %.3f / %.3f / %.3f",
+                gains[0], gains[1], gains[2], gains[3]);
+        telemetry.addData("云台 FF kS / kV / kA", "%.4f / %.6f / %.6f (%.1fV)",
+                ff[0], ff[1], ff[2], ff[5]);
+        telemetry.addData("云台 PB kLin / kQuad", "%.5f / %.6f", ff[3], ff[4]);
     }
 
     private static RearStatusLed.State rearState(boolean fault, boolean reverse, boolean noFire,

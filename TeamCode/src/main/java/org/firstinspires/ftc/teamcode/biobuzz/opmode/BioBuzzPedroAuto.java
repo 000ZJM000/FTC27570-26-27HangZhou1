@@ -31,11 +31,11 @@ import org.firstinspires.ftc.teamcode.biobuzz.shooting.Aiming.FieldTargets;
 import org.firstinspires.ftc.teamcode.biobuzz.shooting.Aiming.ShotMotion;
 import org.firstinspires.ftc.teamcode.biobuzz.shooting.Aiming.ShotSequence;
 import org.firstinspires.ftc.teamcode.biobuzz.shooting.ShotMap;
+import org.firstinspires.ftc.teamcode.biobuzz.subsystems.DecodeTurret;
 import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Drive;
 import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Flywheel;
 import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Intake;
 import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Intake.TaskServos;
-import org.firstinspires.ftc.teamcode.biobuzz.subsystems.Turret;
 import org.json.JSONException;
 
 import java.io.IOException;
@@ -536,7 +536,7 @@ public class BioBuzzPedroAuto extends LinearOpMode {
         private final TaskServos front;
         private final Intake intake;
         private final Flywheel flywheel;
-        private final Turret turret;
+        private final DecodeTurret turret;
         private final ShotMap shotMap;
         private final ShotSequence shot;
         private final double maxRpm;
@@ -553,7 +553,7 @@ public class BioBuzzPedroAuto extends LinearOpMode {
             front = optional("FR/FL", () -> new TaskServos(map));
             intake = optional("吸取", () -> new Intake(map));
             flywheel = optional("飞轮", () -> new Flywheel(map, store, battery));
-            turret = optional("云台", () -> new Turret(map, store, battery));
+            turret = optional("云台", () -> new DecodeTurret(map, store, battery));
             shotMap = optional("射界数据", () -> new ShotMap(store));
             shot = new ShotSequence(turret, flywheel, intake, true);
             maxRpm = flywheel == null ? 0 : flywheel.maxTargetRpm();
