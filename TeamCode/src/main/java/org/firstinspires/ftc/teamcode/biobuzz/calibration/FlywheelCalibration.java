@@ -515,6 +515,7 @@ public final class FlywheelCalibration extends CalibrationOp {
         final double evalHold = 0.15;
 
         try {
+            wheel.setRecoveryBoostEnabled(false);
             // Pre-spin smoothly to baseRpm using known-good positioning gains
             wheel.setPidGains(POSITIONING_PID);
             double[] preSpinHold = {0};
@@ -687,6 +688,7 @@ public final class FlywheelCalibration extends CalibrationOp {
                     startBaseRpm, highRpm, cost, margin, steadyRpmErr, settled, reason);
             return new BayesianPidSearch.Result(cost, margin, settled, reason, steadyRpmErr);
         } finally {
+            wheel.setRecoveryBoostEnabled(true);
             wheel.stop();
         }
     }

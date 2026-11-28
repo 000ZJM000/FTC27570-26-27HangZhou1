@@ -94,11 +94,12 @@ public final class ShotMap {
         double halfRpmOffset = rightHalf ? RobotConfig.SHOT_RIGHT_RPM_OFFSET : RobotConfig.SHOT_LEFT_RPM_OFFSET;
         boolean directRight = rightHalf && rightModel != null;
         double local = directRight ? right : (rightHalf ? FIELD - right : right);
-        double deg = bearing(local, forward, active.goal) + active.angular(local, forward);
+        double deg = bearing(local, forward, active.goal) + active.goalOffsetDeg + active.angular(local, forward);
         double mirroredDeg = directRight ? deg : (rightHalf ? -deg : deg);
         double angle = Math.toRadians(mirroredDeg + active.angleTrim + halfYawOffset);
         double radius = distance(local, forward, active.goal);
-        double rpm = active.speed(radius) + active.rpmTrim + halfRpmOffset;
+        double beta = Math.atan2(local - active.goal[0], active.goal[1] - forward);
+        double rpm = active.speed(radius, beta) + active.rpmTrim + halfRpmOffset;
         return Maths.finite(angle, rpm) && rpm > 0 ? ShotVectorField.Vector.fromShot(angle, Math.min(20_000, rpm)) : null;
     }
 
@@ -184,7 +185,7 @@ public final class ShotMap {
             double sumResidual = 0.0;
             for (double[] p : smaller) {
                 double local = smallerOnRight ? FIELD - p[0] : p[0];
-                double predDeg = bearing(local, p[1], prelim.goal) + prelim.angular(local, p[1]);
+                double predDeg = bearing(local, p[1], prelim.goal) + prelim.goalOffsetDeg + prelim.angular(local, p[1]);
                 double mirroredPred = smallerOnRight ? -predDeg : predDeg;
                 sumResidual += wrapDegrees(p[2] - mirroredPred);
             }
@@ -207,25 +208,92 @@ public final class ShotMap {
     }
 
     private static Model fitHalf(List<double[]> points, double priorX, double priorY, double angleTrim) {
-        double[] goal = fitGoal(points, priorX, priorY);
+        double[] goalSol = fitGoal(points, priorX, priorY);
+        double[] goal = {goalSol[0], goalSol[1]};
+        double goalOffsetDeg = goalSol[2];
         double[] nx = normalization(points, 0), ny = normalization(points, 1);
         double[][] radii = new double[points.size()][1];
+        double[] cosBeta = new double[points.size()];
+        double[] sinBeta = new double[points.size()];
+        double[] rpms = new double[points.size()];
         for (int i = 0; i < points.size(); i++) {
             double[] point = points.get(i);
             radii[i][0] = distance(point[0], point[1], goal);
+            double beta = Math.atan2(point[0] - goal[0], goal[1] - point[1]);
+            cosBeta[i] = Math.cos(beta);
+            sinBeta[i] = Math.sin(beta);
+            rpms[i] = point[3];
         }
         double[] nr = normalization(Arrays.asList(radii), 0);
-        Maths.LeastSquares angular = new Maths.LeastSquares(new double[]{1e-9, 0.18, 0.18}, null);
-        Maths.LeastSquares rpm = new Maths.LeastSquares(new double[]{1e-9, 0.18, 0.72}, null);
-        for (int i = 0; i < points.size(); i++) {
-            double[] p = points.get(i);
-            angular.add(new double[]{1, scale(p[0], nx), scale(p[1], ny)},
-                    wrapDegrees(p[2] - bearing(p[0], p[1], goal)), 1);
-            double r = scale(radii[i][0], nr);
-            rpm.add(new double[]{1, r, r * r}, p[3], 1);
+
+        final double ridge = 0.18;
+        final boolean useDir = points.size() >= 8;
+        final int dim = useDir ? 5 : 3;
+        final double dirPen = Math.max(1.0, ridge * 4.0);
+        double[] penalty = useDir
+                ? new double[]{1e-9, ridge, ridge * 4.0, dirPen, dirPen}
+                : new double[]{1e-9, ridge, ridge * 4.0};
+
+        boolean useRobust = points.size() >= 4;
+        double[] huberWeights = new double[points.size()];
+        if (useRobust) {
+            double rpmMedian = Maths.median(rpms, rpms.length);
+            double[] res0 = new double[points.size()];
+            for (int i = 0; i < points.size(); i++) res0[i] = rpms[i] - rpmMedian;
+            double d0 = huberDelta(res0, 35.0);
+            for (int i = 0; i < points.size(); i++) huberWeights[i] = huberWeight(res0[i], d0);
+        } else {
+            Arrays.fill(huberWeights, 1.0);
         }
-        return new Model(goal, new int[][]{{0, 0}, {1, 0}, {0, 1}}, nx, ny,
-                angular.solve(), nr, rpm.solve(), angleTrim, 0);
+
+        double[] solved = new double[dim];
+        int outerSteps = useRobust ? 6 : 1;
+        for (int iter = 0; iter < outerSteps; iter++) {
+            Maths.LeastSquares rpm = new Maths.LeastSquares(penalty, null);
+            for (int i = 0; i < points.size(); i++) {
+                double r = scale(radii[i][0], nr);
+                double[] features = useDir
+                        ? new double[]{1.0, r, r * r, cosBeta[i], sinBeta[i]}
+                        : new double[]{1.0, r, r * r};
+                rpm.add(features, rpms[i], huberWeights[i]);
+            }
+            double[] next = rpm.solve();
+            if (next == null) break;
+            solved = next;
+            if (!useRobust) break;
+            double[] res = new double[points.size()];
+            for (int i = 0; i < points.size(); i++) {
+                double r = scale(radii[i][0], nr);
+                double pred = solved[0] + solved[1] * r + solved[2] * r * r
+                        + (useDir ? solved[3] * cosBeta[i] + solved[4] * sinBeta[i] : 0.0);
+                res[i] = rpms[i] - pred;
+            }
+            double delta = huberDelta(res, 35.0);
+            for (int i = 0; i < points.size(); i++) huberWeights[i] = huberWeight(res[i], delta);
+        }
+
+        double[] rpmCoeffs = Arrays.copyOf(solved, 3);
+        double[] directional = useDir ? new double[]{solved[3], solved[4]} : new double[]{0.0, 0.0};
+        return new Model(goal, goalOffsetDeg, new int[0][0], nx, ny, new double[0],
+                nr, rpmCoeffs, directional, angleTrim, 0.0);
+    }
+
+    private static double huberDelta(double[] residuals, double floorScale) {
+        if (residuals.length == 0) return 1.345 * floorScale;
+        double[] abs = new double[residuals.length];
+        for (int i = 0; i < residuals.length; i++) abs[i] = Math.abs(residuals[i]);
+        double mad = Maths.median(abs, abs.length);
+        return 1.345 * Math.max(floorScale, 1.4826 * mad);
+    }
+
+    private static double huberWeight(double error, double delta) {
+        double abs = Math.abs(error);
+        return abs <= delta ? 1.0 : delta / abs;
+    }
+
+    private static double huberLoss(double error, double delta) {
+        double abs = Math.abs(error);
+        return abs <= delta ? 0.5 * abs * abs : delta * (abs - 0.5 * delta);
     }
 
     private static double[] normalization(List<double[]> points, int column) {
@@ -249,40 +317,77 @@ public final class ShotMap {
             double c = Math.cos(angle), s = Math.sin(angle);
             seed.add(new double[]{c, s}, c * p[0] + s * p[1], 1);
         }
-        double[] goal = seed.solve();
-        goal[0] = Maths.clip(goal[0], 0, FIELD);
-        goal[1] = Maths.clip(goal[1], 0, FIELD);
-        for (int step = 0; step < 16; step++) {
-            Maths.LeastSquares correction = new Maths.LeastSquares(new double[]{0.025, 0.025}, null);
-            for (double[] p : points) {
-                double dx = goal[0] - p[0], dy = goal[1] - p[1];
-                double squared = Math.max(dx * dx + dy * dy, 0.01);
-                correction.add(new double[]{-dy / squared, dx / squared},
-                        Math.toRadians(wrapDegrees(p[2] - bearing(p[0], p[1], goal))), 1);
-            }
-            double[] delta = correction.solve();
-            if (delta == null || Math.hypot(delta[0], delta[1]) < 1e-7) break;
-            double loss = loss(points, goal);
-            double[] next = goal;
-            for (double fraction = 1; fraction >= 0.03125; fraction /= 2) {
-                double[] trial = {Maths.clip(goal[0] + fraction * delta[0], 0, FIELD),
-                        Maths.clip(goal[1] + fraction * delta[1], 0, FIELD)};
-                if (loss(points, trial) < loss) {
-                    next = trial;
-                    break;
-                }
-            }
-            if (next == goal) break;
-            goal = next;
+        double[] solved = seed.solve();
+        double gx = solved != null ? Maths.clip(solved[0], 0, FIELD) : priorX;
+        double gy = solved != null ? Maths.clip(solved[1], 0, FIELD) : priorY;
+
+        double[] initDiffs = new double[points.size()];
+        for (int i = 0; i < points.size(); i++) {
+            double[] p = points.get(i);
+            initDiffs[i] = wrapDegrees(p[2] - bearing(p[0], p[1], new double[]{gx, gy}));
         }
-        return goal;
+        double th0 = Maths.clip(Maths.median(initDiffs, initDiffs.length), -45.0, 45.0);
+
+        final double priorGoal = 9.0, priorTheta = 0.01, floorScale = 1.8;
+        final double radPerDeg = Math.PI / 180.0;
+        boolean useRobust = points.size() >= 4;
+        int outerSteps = useRobust ? 4 : 1;
+        for (int irls = 0; irls < outerSteps; irls++) {
+            double[] res = new double[points.size()];
+            for (int i = 0; i < points.size(); i++) {
+                double[] p = points.get(i);
+                res[i] = wrapDegrees(p[2] - (bearing(p[0], p[1], new double[]{gx, gy}) + th0));
+            }
+            double delta = useRobust ? huberDelta(res, floorScale) : 1e9;
+
+            for (int step = 0; step < 10; step++) {
+                double[] diag = {priorGoal + 1e-3, priorGoal + 1e-3, priorTheta + 1e-3};
+                double[] priorVec = {
+                        -priorGoal * (gx - priorX) / diag[0],
+                        -priorGoal * (gy - priorY) / diag[1],
+                        -priorTheta * th0 / diag[2]
+                };
+                Maths.LeastSquares correction = new Maths.LeastSquares(diag, priorVec);
+                for (double[] p : points) {
+                    double e = wrapDegrees(p[2] - (bearing(p[0], p[1], new double[]{gx, gy}) + th0));
+                    double hw = useRobust ? huberWeight(e, delta) : 1.0;
+                    double dx = gx - p[0], dy = gy - p[1];
+                    double squared = Math.max(dx * dx + dy * dy, 0.01);
+                    correction.add(new double[]{(-dy / squared) / radPerDeg, (dx / squared) / radPerDeg, 1.0}, e, hw);
+                }
+                double[] corr = correction.solve();
+                if (corr == null || Math.sqrt(corr[0] * corr[0] + corr[1] * corr[1]
+                        + 0.0025 * corr[2] * corr[2]) < 1e-7) break;
+
+                double currentLoss = loss(points, gx, gy, th0, priorX, priorY, priorGoal, priorTheta, useRobust, delta);
+                boolean improved = false;
+                for (double fraction = 1.0; fraction >= 0.03125; fraction /= 2.0) {
+                    double nx = Maths.clip(gx + fraction * corr[0], 0, FIELD);
+                    double ny = Maths.clip(gy + fraction * corr[1], 0, FIELD);
+                    double nt = Maths.clip(th0 + fraction * corr[2], -45.0, 45.0);
+                    if (loss(points, nx, ny, nt, priorX, priorY, priorGoal, priorTheta, useRobust, delta) < currentLoss) {
+                        gx = nx;
+                        gy = ny;
+                        th0 = nt;
+                        improved = true;
+                        break;
+                    }
+                }
+                if (!improved) break;
+            }
+        }
+        return new double[]{gx, gy, th0};
     }
 
-    private static double loss(List<double[]> points, double[] goal) {
-        double sum = 0;
+    private static double loss(List<double[]> points, double gx, double gy, double th0,
+                               double priorX, double priorY, double priorGoal, double priorTheta,
+                               boolean useRobust, double delta) {
+        double dx = gx - priorX, dy = gy - priorY;
+        double sum = 0.5 * priorGoal * (dx * dx + dy * dy) + 0.5 * priorTheta * th0 * th0;
+        double[] goal = {gx, gy};
         for (double[] p : points) {
-            double e = wrapDegrees(p[2] - bearing(p[0], p[1], goal));
-            sum += e * e;
+            double e = wrapDegrees(p[2] - (bearing(p[0], p[1], goal) + th0));
+            sum += useRobust ? huberLoss(e, delta) : 0.5 * e * e;
         }
         return sum;
     }
@@ -300,6 +405,9 @@ public final class ShotMap {
     private static Model parseModel(JSONObject model) throws JSONException {
         double[] goal = vector(model.getJSONArray("goal"), 2, 2);
         if (goal[0] < 0 || goal[0] > FIELD || goal[1] < 0 || goal[1] > FIELD) throw new JSONException("goal outside field");
+        double goalOffsetDeg = model.has("goalOffsetDeg") && !model.isNull("goalOffsetDeg")
+                ? model.getDouble("goalOffsetDeg") : 0.0;
+        if (!Maths.finite(goalOffsetDeg) || Math.abs(goalOffsetDeg) > 45) throw new JSONException("goalOffsetDeg outside range");
         JSONObject angular = model.getJSONObject("angular"), speed = model.getJSONObject("speed");
         double[] nx = normalization(angular, "x"), ny = normalization(angular, "y"), nr = normalization(speed, "radius");
         JSONArray basis = angular.getJSONArray("terms");
@@ -317,8 +425,15 @@ public final class ShotMap {
         if (!Maths.finite(angleTrim, rpmTrim) || Math.abs(angleTrim) > 45 || Math.abs(rpmTrim) > 1000) {
             throw new JSONException("trim outside range");
         }
-        return new Model(goal, terms, nx, ny, coefficients, nr,
-                vector(speed.getJSONArray("coefficients"), 1, 4), angleTrim, rpmTrim);
+        double[] directional = new double[]{0.0, 0.0};
+        if (speed.has("directional") && !speed.isNull("directional")) {
+            directional = vector(speed.getJSONArray("directional"), 2, 2);
+            if (Math.abs(directional[0]) > 2000 || Math.abs(directional[1]) > 2000) {
+                throw new JSONException("directional outside range");
+            }
+        }
+        return new Model(goal, goalOffsetDeg, terms, nx, ny, coefficients, nr,
+                vector(speed.getJSONArray("coefficients"), 1, 4), directional, angleTrim, rpmTrim);
     }
 
     private static final class FitResult {
@@ -345,18 +460,20 @@ public final class ShotMap {
     }
 
     private static final class Model {
-        final double[] goal, nx, ny, coefficients, nr, rpm;
+        final double[] goal, nx, ny, coefficients, nr, rpm, directional;
         final int[][] terms;
-        final double angleTrim, rpmTrim;
+        final double goalOffsetDeg, angleTrim, rpmTrim;
 
-        Model(double[] goal, int[][] terms, double[] nx, double[] ny, double[] coefficients,
-              double[] nr, double[] rpm, double angleTrim, double rpmTrim) {
+        Model(double[] goal, double goalOffsetDeg, int[][] terms, double[] nx, double[] ny, double[] coefficients,
+              double[] nr, double[] rpm, double[] directional, double angleTrim, double rpmTrim) {
             this.goal = goal;
+            this.goalOffsetDeg = goalOffsetDeg;
             this.nx = nx;
             this.ny = ny;
             this.coefficients = coefficients;
             this.nr = nr;
             this.rpm = rpm;
+            this.directional = directional != null && directional.length == 2 ? directional : new double[]{0.0, 0.0};
             this.terms = terms;
             this.angleTrim = angleTrim;
             this.rpmTrim = rpmTrim;
@@ -371,10 +488,10 @@ public final class ShotMap {
             return result;
         }
 
-        double speed(double radius) {
+        double speed(double radius, double beta) {
             double r = scale(radius, nr), value = 0;
             for (int i = rpm.length - 1; i >= 0; i--) value = value * r + rpm[i];
-            return value;
+            return value + directional[0] * Math.cos(beta) + directional[1] * Math.sin(beta);
         }
     }
 }

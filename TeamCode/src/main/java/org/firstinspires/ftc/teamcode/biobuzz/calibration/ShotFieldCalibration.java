@@ -58,7 +58,10 @@ public final class ShotFieldCalibration extends LinearOpMode {
     private double coarseRpm;
 
     private boolean shooting, firedThisPress, cancelWaitRelease, blockerOpen;
+    private boolean rpmLockEnabled = false; // 默认高速直射，与 Biobuzz角落出发 默认一致
+    private boolean hotSpinIdle = false;    // 默认松手停转（安全），副手 Y 可切持续热转（帧级同手动热态）
     private double lockedTurretAngle, spinupDeadline, feedSeconds, shotRpmAtRelease = Double.NaN;
+    private double shotMinRpm = Double.NaN, shotEndRpm = Double.NaN;
     private double loopHz;
     private ShotVectorField.Vector trial, pending;
     private String status = "选格、摆位、调速后扣 RT";
@@ -129,7 +132,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
             field = new ShotVectorField(store, rightHalf);
             ShotMap.exportRecords(store);
             refreshDataView();
-            maxRpm = flywheel.maxTargetRpm();
+            maxRpm = flywheel.maxTargetRpmAtBattery();
             targetRpm = Math.min(RobotConfig.FLYWHEEL_TARGET_RPM, maxRpm);
             lights.show(RearStatusLed.State.CAL_WAIT);
             runCalibration(loop);
@@ -153,6 +156,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
         while (opModeIsActive()) {
             double now = loop.beginFrame();
             battery.update(now);
+            maxRpm = flywheel.maxTargetRpmAtBattery();
             currG1.copy(gamepad1);
             currG2.copy(gamepad2);
             double rawDt = now - lastTime;
@@ -258,6 +262,20 @@ public final class ShotFieldCalibration extends LinearOpMode {
         }
 
         if (!currG2.start) {
+            if (currG2.x && !prevG2.x) {
+                rpmLockEnabled = !rpmLockEnabled;
+                status = rpmLockEnabled
+                        ? "发射模式：锁飞轮转速（同步手动 R3）"
+                        : "发射模式：高速直射（同步手动默认）";
+                gamepad2.rumble(80);
+            }
+            if (currG2.y && !prevG2.y) {
+                hotSpinIdle = !hotSpinIdle;
+                status = hotSpinIdle
+                        ? "待机模式：持续热转（模拟手动热态）"
+                        : "待机模式：松手停转（安全默认）";
+                gamepad2.rumble(80);
+            }
             double yawDelta = 0;
             if (currG2.dpad_left && !prevG2.dpad_left) yawDelta += Math.toRadians(RobotConfig.G2_YAW_FINE_DEG);
             if (currG2.dpad_right && !prevG2.dpad_right) yawDelta -= Math.toRadians(RobotConfig.G2_YAW_FINE_DEG);
@@ -423,17 +441,26 @@ public final class ShotFieldCalibration extends LinearOpMode {
         firedThisPress = false;
         feedSeconds = 0;
         shotRpmAtRelease = Double.NaN;
+        shotMinRpm = Double.NaN;
+        shotEndRpm = Double.NaN;
         spinupDeadline = now + SPIN_UP_TIMEOUT;
-        status = "已锁云台刹车，等待飞轮从零达速稳态";
-        RobotLog.ii("BioBuzzShot", "06 RT pressed: targetRpm=%.0f turret=%+.2f deg",
-                targetRpm, Math.toDegrees(turret.boreRelative()));
+        status = hotSpinIdle ? "已锁云台刹车，等待飞轮入闸" : "已锁云台刹车，等待飞轮从零达速稳态";
+        RobotLog.ii("BioBuzzShot", "06 RT pressed: targetRpm=%.0f turret=%+.2f deg mode=%s idle=%s",
+                targetRpm, Math.toDegrees(turret.boreRelative()),
+                rpmLockEnabled ? "rpm-lock" : "fast-direct", hotSpinIdle ? "hot-spin" : "stop");
     }
 
     private void updateShootingLoop(Gamepad currG1, double now, double dt) {
         boolean triggerPressed = !dataViewMode && !currG1.start && currG1.right_trigger > TRIGGER_THRESHOLD;
+        boolean keepSpinning = hotSpinIdle && !dataViewMode && !turret.softHoming()
+                && flywheel.rpmCalibrated() && !flywheel.faulted() && targetRpm > 0;
+        boolean idleWhenNotFiring = !keepSpinning || rpmLockEnabled;
+        boolean stopWhenIdle = !keepSpinning;
+        double settleSec = keepSpinning ? 0.0 : RPM_SETTLE_SECONDS;
+        double strictTol = keepSpinning ? 0.0 : SPINUP_TOLERANCE;
         if (!shooting) {
-            shot.update(false, false, false, false, false, targetRpm, true, true, true,
-                    RPM_SETTLE_SECONDS, true, SPINUP_TOLERANCE);
+            shot.update(false, false, false, false, false, targetRpm, rpmLockEnabled, idleWhenNotFiring, true,
+                    settleSec, stopWhenIdle, strictTol);
             flywheel.feed(false);
             intake.set(false, false, false);
             blockerOpen = false;
@@ -453,8 +480,8 @@ public final class ShotFieldCalibration extends LinearOpMode {
         // Actively brake & hold turret at the aimed angle while spinning up and feeding
         turret.control(lockedTurretAngle, 0, dt);
 
-        boolean releaseShot = shot.update(true, false, false, false, false, targetRpm, true, true, true,
-                RPM_SETTLE_SECONDS, true, SPINUP_TOLERANCE);
+        boolean releaseShot = shot.update(true, false, false, false, false, targetRpm, rpmLockEnabled,
+                idleWhenNotFiring, true, settleSec, false, strictTol);
         boolean firing = flywheel.feed(releaseShot);
         intake.set(false, firing, false);
         if (blockerOpen != firing) {
@@ -465,14 +492,17 @@ public final class ShotFieldCalibration extends LinearOpMode {
         }
 
         if (firing) {
+            double curRpm = flywheel.rpm();
             if (!firedThisPress) {
                 firedThisPress = true;
-                shotRpmAtRelease = flywheel.rpm();
+                shotRpmAtRelease = curRpm;
                 trial = ShotVectorField.Vector.fromShot(turret.boreRelative(), targetRpm);
                 trialVoltage = battery.measured() ? battery.volts() : -1;
                 trialPitch = pitch != null ? pitch.getPosition() : -1;
                 gamepad1.rumble(120);
             }
+            shotMinRpm = Double.isFinite(shotMinRpm) ? Math.min(shotMinRpm, curRpm) : curRpm;
+            shotEndRpm = curRpm;
             feedSeconds += dt;
         }
 
@@ -488,19 +518,30 @@ public final class ShotFieldCalibration extends LinearOpMode {
     private void finishShot(boolean keepTrial, String customMessage, double now) {
         if (keepTrial && trial != null) {
             pending = trial;
-            status = String.format(Locale.ROOT, "供弹 %.2fs（放行 %.0f/%.0f RPM），命中按 A 保存",
-                    feedSeconds, shotRpmAtRelease, targetRpm);
+            status = String.format(Locale.ROOT, "供弹 %.2fs（放行 %.0f / 最低 %.0f / 末 %.0f / 目标 %.0f），命中按 A 保存",
+                    feedSeconds, shotRpmAtRelease, shotMinRpm, shotEndRpm, targetRpm);
         } else {
             status = customMessage != null ? customMessage : "试射结束";
         }
         shot.releaseTrigger();
-        stopFeed();
+        if (hotSpinIdle && !dataViewMode && !isStopRequested() && (flywheel == null || !flywheel.faulted())) {
+            if (flywheel != null) flywheel.feed(false);
+            if (intake != null) intake.set(false, false, false);
+        } else {
+            stopFeed();
+        }
         if (turret != null && brake) turret.stop();
         blockerOpen = false;
         shooting = false;
         firedThisPress = false;
         trial = null;
-        if (keepTrial) RobotLog.ii("BioBuzzShot", "06 RT released: feedSeconds=%.2f", feedSeconds);
+        if (keepTrial) {
+            RobotLog.ii("BioBuzzShot",
+                    "06 RT released: feedSeconds=%.2f releaseRpm=%.0f minRpm=%.0f endRpm=%.0f target=%.0f",
+                    feedSeconds, shotRpmAtRelease, shotMinRpm, shotEndRpm, targetRpm);
+        }
+        shotMinRpm = Double.NaN;
+        shotEndRpm = Double.NaN;
     }
 
     private void updateLights() {
@@ -520,7 +561,8 @@ public final class ShotFieldCalibration extends LinearOpMode {
         packet.put("loop_hz", loopHz);
         packet.put("battery_V", battery.volts());
         packet.put("feeding", blockerOpen ? 1 : 0);
-        packet.put("rpm_lock", 1);
+        packet.put("rpm_lock", rpmLockEnabled ? 1 : 0);
+        packet.put("hot_spin_idle", hotSpinIdle ? 1 : 0);
         if (turret != null) {
             packet.put("turret_angle_deg", Math.toDegrees(turret.angle));
             packet.put("turret_target_deg", Math.toDegrees(Double.isFinite(holdTarget) ? holdTarget
@@ -755,11 +797,16 @@ public final class ShotFieldCalibration extends LinearOpMode {
                 turret.encoderReady() ? String.format("%+.1f°（左为正）", Math.toDegrees(turret.boreRelative())) : "角度不可用");
         if (flywheel.rpmCalibrated()) {
             double[] gains = flywheel.pidGains();
-            telemetry.addData("飞轮 实际 / 设定 / 上限", "%.0f / %.0f / %.0f RPM（平时停转，按RT起转）",
+            telemetry.addData("飞轮 实际 / 设定 / 上限", hotSpinIdle
+                            ? "%.0f / %.0f / %.0f RPM（持续热转中）"
+                            : "%.0f / %.0f / %.0f RPM（平时停转，按RT起转）",
                     flywheel.rpm(), targetRpm, maxRpm);
             telemetry.addData("飞轮 PID", "%s %.3f/%.3f/%.3f | %.0f Hz",
                     flywheel.pidSource(), gains[0], gains[1], gains[2], loopHz);
         }
+        telemetry.addData("发射模式", "%s · %s（副手 X 切模式 / Y 切热转）",
+                rpmLockEnabled ? "锁飞轮转速 [同步手动R3]" : "高速直射 [同步手动默认]",
+                hotSpinIdle ? "持续热转" : "松手停转");
         String shotLine = status;
         if (shooting) {
             if (blockerOpen) {
@@ -767,7 +814,7 @@ public final class ShotFieldCalibration extends LinearOpMode {
                         feedSeconds, shotRpmAtRelease);
             } else {
                 String waiting = shot.waitingStatus();
-                shotLine = waiting != null ? waiting : "正在从零起转飞轮，等待稳态";
+                shotLine = waiting != null ? waiting : (hotSpinIdle ? "正在准备入闸" : "正在从零起转飞轮，等待稳态");
             }
         }
         telemetry.addData("试射", shotLine);
@@ -776,8 +823,8 @@ public final class ShotFieldCalibration extends LinearOpMode {
         showVector("当前点已保存", point == null ? field.at(column, row) : field.at(point));
         if (point == null) showGrid();
         telemetry.addLine(point == null ? "方向键选格 | Back 四角精测 | L3 查看数据" : "方向键左/右换角 | Back 回格心 | L3 查看数据");
-        telemetry.addLine("LB/RB −/+25 | X 刹车/松开 | R3 预瞄 | 副手 上下±25RPM 左右±0.5° LB/RB±5° A回前 B寻零");
-        telemetry.addLine("按住 RT 锁台从零达速射（松手停转）| A 保存 | Y 不可达 | B 取消");
+        telemetry.addLine("LB/RB −/+25 | X 刹车/松开 | R3 预瞄 | 副手 上下±25RPM 左右±0.5° LB/RB±5° A回前 B寻零 X切模式 Y切热转");
+        telemetry.addLine("按住 RT 锁台试射（高速直射同步手动默认）| A 保存 | Y 不可达 | B 取消");
         telemetry.addLine("START+X 删records/model JSON | START+Y 清旧v1 | START+Back 全清");
         telemetry.update();
     }

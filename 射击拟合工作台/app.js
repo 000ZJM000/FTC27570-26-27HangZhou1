@@ -31,7 +31,9 @@
       rpmOrder: Math.round(value("rpmOrder", 0, 3)),
       ridge: value("ridge", 0.001, 10),
       angleTrim: value("angleTrim", -45, 45),
-      rpmTrim: value("rpmTrim", -1000, 1000)
+      rpmTrim: value("rpmTrim", -1000, 1000),
+      robust: typeof source.robust === "boolean" ? source.robust : fit.defaults.robust,
+      directionalRpm: typeof source.directionalRpm === "boolean" ? source.directionalRpm : fit.defaults.directionalRpm
     };
   }
 
@@ -78,6 +80,7 @@
 
   function syncControls() {
     for (const key of ["angleOrder", "rpmOrder", "angleTrim", "rpmTrim"]) byId(key).value = settings[key];
+    for (const key of ["robust", "directionalRpm"]) byId(key).checked = Boolean(settings[key]);
     byId("ridge").value = Math.log10(settings.ridge);
     byId("ridge-value").textContent = "λ " + settings.ridge.toPrecision(3);
   }
@@ -96,15 +99,30 @@
     if (!model) return "至少需要一个参与拟合的实测点。";
     const [right, forward] = model.goal;
     const trim = value => value === 0 ? "" : value > 0 ? " + " + value : " − " + Math.abs(value);
+    const offset = Number.isFinite(model.goalOffsetDeg) ? model.goalOffsetDeg : 0;
+    const offsetTerm = Math.abs(offset) >= 0.0005
+      ? (offset > 0 ? " + " : " − ") + format(Math.abs(offset), 3)
+      : "";
+    const polyExpr = model.angular.terms.length ? " + P" : "";
     const [x0, sx] = model.angular.x, [y0, sy] = model.angular.y;
     const [r0, sr] = model.speed.radius;
     const radial = model.speed.coefficients.map((value, i) =>
       (value < 0 ? " − " : i > 0 ? " + " : "") + format(Math.abs(value), 3) + (i === 0 ? "" : i === 1 ? "d" : "d^" + i)).join("");
-    return "θ = s × (atan2(x − " + format(right, 5) + ", " + format(forward, 5) + " − y) × 180/π + P)" +
-      trim(settings.angleTrim) + "\nP = " + polynomial(model.angular) +
-      "\nu = (x − " + format(x0, 4) + ")/" + format(sx, 4) + ", v = (y − " + format(y0, 4) + ")/" + format(sy, 4) +
-      "\nRPM = " + radial + trim(settings.rpmTrim) +
-      "\nd = (到目标的距离 − " + format(r0, 4) + ")/" + format(sr, 4);
+    const [ac, as] = model.speed.directional || [0, 0];
+    const hasDir = Math.abs(ac) >= 0.05 || Math.abs(as) >= 0.05;
+    const dirExpr = hasDir
+      ? (ac >= 0 ? " + " : " − ") + format(Math.abs(ac), 1) + "cos β" +
+        (as >= 0 ? " + " : " − ") + format(Math.abs(as), 1) + "sin β"
+      : "";
+    return "θ = s × (atan2(x − " + format(right, 5) + ", " + format(forward, 5) + " − y) × 180/π" +
+      offsetTerm + polyExpr + ")" + trim(settings.angleTrim) +
+      (model.angular.terms.length
+        ? "\nP = " + polynomial(model.angular) +
+          "\nu = (x − " + format(x0, 4) + ")/" + format(sx, 4) + ", v = (y − " + format(y0, 4) + ")/" + format(sy, 4)
+        : "") +
+      "\nRPM = " + radial + dirExpr + trim(settings.rpmTrim) +
+      "\nd = (r − " + format(r0, 4) + ")/" + format(sr, 4) +
+      (hasDir ? "，β = atan2(x − " + format(right, 3) + ", " + format(forward, 3) + " − y)" : "");
   }
 
   function updateFit(persist = false) {
@@ -125,8 +143,12 @@
     byId("record-count").textContent = points.length + " 条记录 · " + points.filter(point => point.blocked).length + " 不可达";
     byId("angle-error").textContent = stats ? format(stats.inside.angle, 2) + "°" : "—";
     byId("rpm-error").textContent = stats ? format(stats.inside.rpm) + " RPM" : "—";
-    byId("angle-validation").textContent = "留一验证 " + (stats?.validation ? format(stats.validation.angle, 2) + "°" : "—");
-    byId("rpm-validation").textContent = "留一验证 " + (stats?.validation ? format(stats.validation.rpm, 0) + " RPM" : "—");
+    byId("angle-validation").textContent = "留一验证 " + (stats?.validation
+      ? format(stats.validation.angle, 2) + "° · 中位 " + format(stats.validationMedian?.angle, 2) + "°"
+      : "—");
+    byId("rpm-validation").textContent = "留一验证 " + (stats?.validation
+      ? format(stats.validation.rpm, 0) + " RPM · 中位 " + format(stats.validationMedian?.rpm, 0)
+      : "—");
     byId("equations").textContent = equationText();
     byId("rpm-low").textContent = format(rpmLow, 0);
     byId("rpm-high").textContent = format(rpmHigh, 0);
@@ -454,6 +476,23 @@
     settings.ridge = 10 ** Number(event.target.value);
     scheduleFit();
   });
+  for (const key of ["robust", "directionalRpm"]) {
+    byId(key).addEventListener("change", event => {
+      settings = checkedSettings({ ...settings, [key]: event.target.checked });
+      updateFit(true);
+    });
+  }
+  byId("auto-tune").addEventListener("click", () => {
+    const tuned = fit.autoTune(points, settings, geometry);
+    if (!tuned) return message("至少需要 4 个有效实测点才能自动寻优。");
+    settings = checkedSettings(tuned.settings);
+    syncControls();
+    updateFit(true);
+    const v = tuned.stats?.validation;
+    message(v
+      ? "已自动寻优：留一验证 " + format(v.angle, 2) + "° / " + format(v.rpm, 0) + " RPM。"
+      : "已应用自动寻优参数。");
+  });
   byId("reset-controls").addEventListener("click", () => { settings = { ...fit.defaults }; syncControls(); updateFit(true); });
   byId("mirror").addEventListener("change", () => updateFit());
   byId("extrapolate").addEventListener("change", draw);
@@ -715,6 +754,7 @@
       const deltaTd = document.createElement("td");
       deltaTd.className = "delta-badge";
       deltaTd.textContent = anchorDeltaText(row);
+      row.deltaTd = deltaTd;
 
       check.addEventListener("change", () => {
         row.checked = check.checked;
@@ -782,19 +822,35 @@
     errorEl.textContent = "";
     applyBtn.disabled = false;
     const s = result.summary;
+    const diagById = new Map((result.anchorDiagnostics || []).map(item => [item.id, item]));
+    for (const row of recalAnchors) {
+      if (!row.deltaTd) continue;
+      const diag = row.checked ? diagById.get(row.id) : null;
+      const baseText = anchorDeltaText(row);
+      if (diag?.outlier) {
+        row.deltaTd.className = "delta-badge warn";
+        row.deltaTd.textContent = baseText + "（降权 w=" + format(Math.min(diag.angleWeight, diag.rpmWeight), 2) + "）";
+      } else {
+        row.deltaTd.className = "delta-badge";
+        row.deltaTd.textContent = baseText;
+      }
+    }
     const [r0, sr] = s.rNorm;
     const rpmExpr = s.rpmCoeffs.map((value, i) =>
       (value < 0 ? " − " : i > 0 ? " + " : "") + format(Math.abs(value), 1) + (i === 0 ? "" : i === 1 ? "d" : "d^" + i)).join("");
+    const [dgx, dgy] = s.goalShift || [0, 0];
     const angleText = s.angleMode === "keep" ? "保持原射向不变"
-      : s.effAngleOrder === 0 ? "射向整体平移 " + signed(s.meanDeltaAngle, 2) + "°"
-      : "Δθ(d) = " + signed(s.angleCoeffs[0], 2) + "°" +
-        ((s.angleCoeffs[1] || 0) >= 0 ? " + " : " − ") + format(Math.abs(s.angleCoeffs[1] || 0), 2) + "°d";
+      : s.effAngleOrder === 0 ? "射向统一平移 " + signed(s.meanDeltaAngle, 2) + "°"
+      : "2D MAP 目标偏移 (" + signed(dgx, 3) + ", " + signed(dgy, 3) + ") 格 · 零位 " + signed(s.deltaGoalOffsetDeg, 2) + "°";
+    const outlierNote = s.outlierIds?.length
+      ? "\n⚠ 抗噪降权锚点：" + s.outlierIds.join("、") + "（偏离群体趋势，Huber 已自动降低影响）"
+      : "";
     byId("recal-summary").textContent =
       "锚点：" + result.anchorCount + " 点 → 待更新全部测点：" + result.calibratedCount + " 点" +
       (s.useCornerModelAsBaseline ? "（检测到格心已覆盖：已自动改用 24 点角点拟合面作为旧基准）" : "") +
-      "\n平均偏移：射向 " + signed(s.meanDeltaAngle, 2) + "° · 转速 " + signed(s.meanDeltaRpm, 0) + " RPM" +
+      "\n加权平均偏移：射向 " + signed(s.meanDeltaAngle, 2) + "° · 转速 " + signed(s.meanDeltaRpm, 0) + " RPM" +
       "（近端 " + signed(s.nearDeltaRpm, 0) + " → 远端 " + signed(s.farDeltaRpm, 0) + " RPM）" +
-      "\nΔRPM = " + rpmExpr + "  (d = (r − " + format(r0, 3) + ")/" + format(sr, 3) + ")  |  " + angleText;
+      "\nΔRPM = " + rpmExpr + "  (d = (r − " + format(r0, 3) + ")/" + format(sr, 3) + ")  |  " + angleText + outlierNote;
 
     const fragment = document.createDocumentFragment();
     for (const row of result.comparisons) {

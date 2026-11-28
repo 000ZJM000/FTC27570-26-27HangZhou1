@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "timestamp": "2026-11-25T19:26:31.718Z",
+  "timestamp": "2026-11-28T04:08:28.644Z",
   "startPoint": {
     "x": 31.155529695398666,
     "y": 8.50444863059304,
@@ -93,13 +93,13 @@
       "waitAfterName": "",
       "kind": "atomic",
       "endPoint": {
-        "x": 24.51706558679537,
-        "y": 96.7808643978267
+        "x": 33.72339742123147,
+        "y": 98.67256985472869
       },
       "controlPoints": [
         {
-          "x": 27.24130953061818,
-          "y": 34.71250613310318
+          "x": 33.29478546644707,
+          "y": 8.859115475137674
         }
       ],
       "heading": {
@@ -126,11 +126,18 @@
       }
     },
     {
-      "kind": "atomic",
       "id": "line-mwwe5318-1q0hgb",
+      "color": "#76b7b2",
+      "name": "",
+      "locked": false,
+      "waitBeforeMs": 0,
+      "waitAfterMs": 2000,
+      "waitBeforeName": "",
+      "waitAfterName": "",
+      "kind": "atomic",
       "endPoint": {
-        "x": 60.79652010932508,
-        "y": 130.70593359453872
+        "x": 60.922638040017866,
+        "y": 128.6881130934662
       },
       "controlPoints": [
         {
@@ -158,13 +165,7 @@
             }
           ]
         }
-      },
-      "color": "#76b7b2",
-      "locked": false,
-      "waitBeforeMs": 0,
-      "waitAfterMs": 2000,
-      "waitBeforeName": "",
-      "waitAfterName": ""
+      }
     },
     {
       "id": "line-mwupin1n-2ztqxj",
@@ -214,8 +215,8 @@
       "waitAfterName": "",
       "kind": "atomic",
       "endPoint": {
-        "x": 46.68112773551386,
-        "y": 126.08689734085907
+        "x": 46.42890342021734,
+        "y": 123.81684386492324
       },
       "controlPoints": [],
       "heading": {
@@ -288,8 +289,8 @@
       "waitAfterName": "",
       "kind": "atomic",
       "endPoint": {
-        "x": 60.62991123502196,
-        "y": 130.64853578041976
+        "x": 60.88212400422943,
+        "y": 128.75683032351776
       },
       "controlPoints": [
         {
@@ -330,13 +331,13 @@
       "waitAfterName": "",
       "kind": "atomic",
       "endPoint": {
-        "x": 10.276656630484204,
-        "y": 120.38274050359136
+        "x": 10.024426542143159,
+        "y": 122.27445173353789
       },
       "controlPoints": [
         {
-          "x": 49.91616021271512,
-          "y": 113.58711674672884
+          "x": 34.53024605784641,
+          "y": 120.90173735121842
         }
       ],
       "heading": {

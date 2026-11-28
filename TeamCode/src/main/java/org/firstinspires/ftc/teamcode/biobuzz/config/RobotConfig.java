@@ -71,7 +71,6 @@ public final class RobotConfig {
     public static final double SHOT_RPM_TOLERANCE = 0.10;
     public static final double SHOT_TURRET_STILL_RATE = 0.13;
     public static final double SHOT_TURRET_STILL_SECONDS = 0.10;
-    public static final double FEED_POWER = 1.0;
     public static final double INTAKE_RAISE_SETTLE_SECONDS = 0.18;
 
     // Optional measured defaults. Flywheel calibration can fill in the encoder scale on the Hub.
@@ -79,9 +78,9 @@ public final class RobotConfig {
 
     public static final double INTAKE_POWER = 1.0;
     public static final double INTAKE_REVERSE_POWER = 1.0;
-    public static final double SL_INTAKE = 0.95, SR_INTAKE = 0.035;
-    public static final double SL_UP = 0.825, SR_UP = 0.16;
-    public static final double SL_FULL_UP = 0.68, SR_FULL_UP = 0.31; // reserved only; do not wire into behavior yet
+    public static final double SL_INTAKE = 0.79, SR_INTAKE = 0.28;
+    public static final double SL_UP = 0.53, SR_UP = 0.50;
+    public static final double SL_FULL_UP = 0.255, SR_FULL_UP = 0.83; // reserved only; do not wire into behavior yet
     public static final double SB_IDLE = 0.25, SB_FIRE = 0.60;
     public static final double ST_HOME = 0.47, ST_HIGH = 0.05;
     public static final double FR_INIT = 0.855, FR_HOME = 0.98, FR_OTHER = 0.0;
@@ -115,6 +114,15 @@ public final class RobotConfig {
 
     public static double FLYWHEEL_TARGET_RPM = 3100.0;
     public static double FLYWHEEL_RPM_STEP = 100.0;
+    public static double FEED_POWER = 1.0;
+    public static double FLYWHEEL_INTEGRAL_LIMIT = 0.08;
+    public static double FLYWHEEL_INTEGRAL_ZONE_RPM = 140.0;
+    public static double FLYWHEEL_OVERSPEED_COAST_RPM = 85.0;
+    public static double FLYWHEEL_RECOVERY_DEADBAND_RPM = 45.0;
+    public static double FLYWHEEL_RECOVERY_FULL_RPM = 130.0;
+    public static double FLYWHEEL_LOCK_PAUSE_RATIO = 0.82;
+    public static double FLYWHEEL_LOCK_RESUME_RATIO = 0.92;
+    public static double FAST_SHOT_ENTRY_TIMEOUT_SECONDS = 0.45;
 
     // TeleOp drive behavior & full-power options
     public static boolean ENABLE_DRIVE_LOW_VOLT_CAP = false;
@@ -134,6 +142,8 @@ public final class RobotConfig {
     public static double AUTO_VOLLEY_MAX_EXTRA_SECONDS = 1.50;
     public static double AUTO_STARTUP_SPINUP_SECONDS = 0.60;
     public static double AUTO_RPM_SETTLE_SECONDS = 0.10;
+    public static double AUTO_LEG2_PUSH_SECONDS = 0.80;
+    public static double AUTO_LEG2_PUSH_POWER = 0.60;
     public static double AUTO_LEG4_SHOOT_DELAY_SECONDS = 0.30;
     public static int AUTO_LEG6_BUMP_CYCLES = 3;
     public static double AUTO_LEG6_BACK_SECONDS = 0.20;

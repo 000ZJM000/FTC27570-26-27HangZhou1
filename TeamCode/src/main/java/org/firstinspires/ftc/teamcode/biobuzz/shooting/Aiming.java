@@ -188,6 +188,7 @@ public final class Aiming {
         private boolean blocked, turretReady, speedReady, intakeReady;
         private boolean startupBlocked, rpmSettled, strictMode;
         private double rpmReadySince = Double.NaN;
+        private double triggerHeldSince = Double.NaN;
 
         public ShotSequence(Turret turret, Flywheel shooter, Intake intake, boolean calibratedMode) {
             this.turret = turret;
@@ -247,6 +248,11 @@ public final class Aiming {
             blocked = reverseRequested || noFireZone || targetRpm <= 0 || intake == null || shooter == null
                     || shooter.faulted() || !shooter.rpmCalibrated() || !shooter.hasBlocker();
             boolean checkShot = triggerHeld && !blocked;
+            if (checkShot && !released && !interrupted) {
+                if (!Double.isFinite(triggerHeldSince)) triggerHeldSince = now;
+            } else {
+                triggerHeldSince = Double.NaN;
+            }
             startupBlocked = !startupReady;
             rpmSettled = rpmSettleSeconds <= 0
                     || (Double.isFinite(rpmReadySince) && now - rpmReadySince >= rpmSettleSeconds);
@@ -255,9 +261,16 @@ public final class Aiming {
                     || (turretZeroLock ? (turret.atForwardZero() || turret.stableForShot())
                     : (!trackingTurret || turret.aimReady() || turret.stableForShot()));
             turretReady = checkShot && (released || interrupted || turretAligned);
-            speedReady = checkShot && (!rpmLockEnabled
-                    || (released ? shooter.readyForShot(feeding)
-                    : (startupReady && atLaunchSpeed && rpmSettled)));
+            boolean entrySpeedMet = startupReady && atLaunchSpeed && rpmSettled;
+            double fastTimeout = Math.max(0.0, RobotConfig.FAST_SHOT_ENTRY_TIMEOUT_SECONDS);
+            boolean allowFastTimeout = !rpmLockEnabled && !strictMode && rpmSettleSeconds <= 0 && !stopWhenIdle;
+            boolean fastEntryTimedOut = allowFastTimeout && Double.isFinite(triggerHeldSince)
+                    && now - triggerHeldSince >= fastTimeout;
+            if (rpmLockEnabled) {
+                speedReady = checkShot && (released ? shooter.readyForShot(feeding) : entrySpeedMet);
+            } else {
+                speedReady = checkShot && (released || entrySpeedMet || fastEntryTimedOut);
+            }
             intakeReady = intake != null && intake.readyToFeed();
             return updateTrigger(triggerPressed, turretReady && intakeReady);
         }
@@ -269,7 +282,7 @@ public final class Aiming {
             if (blocked) return "检查云台、供弹机构和飞轮";
             if (startupBlocked) return "等待开机飞轮预热";
             if (!turretReady) return "等待云台对准或停稳";
-            if (!speedReady) return strictMode ? "等待飞轮从零达速稳态（±3.5%）" : "等待飞轮进入 −8% 至 +12% 转速区间";
+            if (!speedReady) return strictMode ? "等待飞轮从零达速稳态（±3.5%）" : "等待飞轮进入 −8% 至 +4.5% 转速区间";
             if (!intakeReady) return "等待吸取舵机抬起";
             return null;
         }
@@ -290,7 +303,10 @@ public final class Aiming {
             return feeding;
         }
 
-        public void releaseTrigger() { released = interrupted = feeding = false; }
+        public void releaseTrigger() {
+            released = interrupted = feeding = false;
+            triggerHeldSince = Double.NaN;
+        }
     }
 
     /** Timed autonomous shooting window bounded by feed target and deadline. */

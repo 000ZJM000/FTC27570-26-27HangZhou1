@@ -1,38 +1,17 @@
 {
   "version": "2.0.0",
-  "timestamp": "2026-11-25T23:23:10.533Z",
+  "timestamp": "2026-11-28T01:18:33.934Z",
   "startPoint": {
-    "x": 34.4308549605589,
-    "y": 132.5934572576839,
-    "locked": false,
-    "headingDeg": 90
+    "x": 34.43448043252058,
+    "y": 132.85293828994833,
+    "headingDeg": 90,
+    "locked": false
   },
   "lines": [
     {
-      "id": "line-mwv5t66e-hisem2",
+      "id": "line-mwyfvi01-l7x6qq",
       "color": "#ffc516",
       "name": "Path 1",
-      "locked": false,
-      "waitBeforeMs": 0,
-      "waitAfterMs": 10000,
-      "waitBeforeName": "",
-      "waitAfterName": "",
-      "kind": "atomic",
-      "endPoint": {
-        "x": 34.44570323107714,
-        "y": 128.60116115100882
-      },
-      "controlPoints": [],
-      "heading": {
-        "type": "linear",
-        "startDeg": 270,
-        "endDeg": 270
-      }
-    },
-    {
-      "id": "line-mwv5v9wi-0a08jk",
-      "color": "#59a14f",
-      "name": "",
       "locked": false,
       "waitBeforeMs": 0,
       "waitAfterMs": 0,
@@ -40,21 +19,21 @@
       "waitAfterName": "",
       "kind": "atomic",
       "endPoint": {
-        "x": 12.506572452805544,
-        "y": 120.60069417646922
+        "x": 9.337797358711779,
+        "y": 89.59848099978849
       },
       "controlPoints": [
         {
-          "x": 30.30008274346256,
-          "y": 119.25828077947118
+          "x": 9.578348993313531,
+          "y": 129.820920719883
         }
       ],
       "heading": {
         "type": "linear",
-        "reverse": true,
+        "startDeg": 0,
+        "endDeg": 0,
         "degrees": 0,
-        "startDeg": 270,
-        "endDeg": 270,
+        "reverse": false,
         "piecewiseHeading": {
           "segments": [
             {
@@ -237,11 +216,7 @@
   "sequence": [
     {
       "kind": "path",
-      "lineId": "line-mwv5t66e-hisem2"
-    },
-    {
-      "kind": "path",
-      "lineId": "line-mwv5v9wi-0a08jk"
+      "lineId": "line-mwyfvi01-l7x6qq"
     }
   ],
   "fieldPoints": [],

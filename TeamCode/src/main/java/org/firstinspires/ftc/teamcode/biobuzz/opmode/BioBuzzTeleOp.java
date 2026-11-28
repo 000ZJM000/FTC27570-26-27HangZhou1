@@ -217,7 +217,7 @@ public final class BioBuzzTeleOp extends LinearOpMode {
             boolean lastTurretUnlock = (gamepad1.back && gamepad1.right_stick_button) || gamepad2.right_stick_button;
             boolean rpmLockEnabled = false, turretUnlocked = false, turretLockedZero = false;
             double yawTrim = 0;
-            double maxRpm = shooter != null ? shooter.maxTargetRpm() : 0;
+            double maxRpm = shooter != null ? shooter.maxTargetRpmAtBattery() : 0;
             double targetRpm = Math.min(RobotConfig.FLYWHEEL_TARGET_RPM, maxRpm);
             double rpmTrim = 0;
 
@@ -402,6 +402,7 @@ public final class BioBuzzTeleOp extends LinearOpMode {
                 FieldTargets fallbackAim = sample == null && automatic && field && positionForAim
                         ? FieldTargets.fromPose(pose.forward, pose.left, pose.heading) : null;
 
+                maxRpm = shooter != null ? shooter.maxTargetRpmAtBattery() : 0;
                 double baseRpm = CornerAim.targetRpm(sample);
                 double firingRpm = Maths.clip(baseRpm + rpmTrim, 0, maxRpm);
                 if (rpmStep != 0) {

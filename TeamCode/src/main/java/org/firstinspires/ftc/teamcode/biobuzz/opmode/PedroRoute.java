@@ -26,6 +26,8 @@ import java.util.Map;
 public final class PedroRoute {
     static final String ASSET = "pedro/two-group-route.json";
     static final String WAIT_SHOOT_PARK_ASSET = "pedro/wait-shoot-park-route.json";
+    static final String DIRECT_PARK_FAR_ASSET = "pedro/direct-park-far-route.json";
+    static final String DIRECT_PARK_NEAR_ASSET = "pedro/direct-park-near-route.json";
 
     public final Pose start;
     public final List<Leg> legs;

@@ -53,7 +53,7 @@
       </section>
 
       <section class="panel fit-panel" aria-labelledby="fit-title">
-        <header class="section-head"><h2 id="fit-title">方程与微调</h2><button id="reset-controls" class="plain" type="button">恢复默认</button></header>
+        <header class="section-head"><h2 id="fit-title">方程与微调</h2><div class="actions"><button id="auto-tune" class="plain" type="button">自动寻优</button><button id="reset-controls" class="plain" type="button">恢复默认</button></div></header>
         <div class="controls">
           <label>射向修正阶数
             <select id="angleOrder"><option value="-1">几何瞄准</option><option value="0">常数</option><option value="1">一次</option><option value="2">二次</option></select>
@@ -66,10 +66,14 @@
           </label>
           <label>射向微调 ° <input id="angleTrim" type="number" min="-45" max="45" step="0.25"></label>
           <label>转速微调 RPM <input id="rpmTrim" type="number" min="-1000" max="1000" step="25"></label>
+          <div class="across actions toggles fit-toggles">
+            <label class="check"><input id="robust" type="checkbox" checked> 抗离群点拟合 (Huber)</label>
+            <label class="check"><input id="directionalRpm" type="checkbox" checked> 方向 RPM 修正</label>
+          </div>
         </div>
         <div class="equations">
           <div class="equation-label"><span>当前方程</span><button id="copy-equations" class="plain" type="button">复制</button></div>
-          <div class="variables">u = x − 0.5，v = (y − 3) / 3，x 右 · y 前，以格为单位</div>
+          <div class="variables">x、y 为云台转轴坐标（格）；u、v、d 由参与拟合测点的均值与标准差标准化并限于 ±3</div>
           <pre id="equations"></pre>
           <p>右半场用 x → 6 − x，射向取反。测点包络之外的读数为外推。</p>
         </div>
@@ -160,14 +164,15 @@
     <div class="controls recal-controls">
       <label>迁移算法
         <select id="recal-strategy">
-          <option value="local-anchor">格心锚定 + 径向梯度迁移（推荐：保留四角微差）</option>
-          <option value="global-curve">全局平滑径向曲线迁移（抗单点波动）</option>
+          <option value="bayesian-map">贝叶斯 MAP 2D 几何 + 抗噪收缩（推荐：偏差最低）</option>
+          <option value="local-anchor">格心抗噪锚定 + 径向梯度迁移</option>
+          <option value="global-curve">全局平滑曲线迁移</option>
           <option value="residual-stack">新角度曲线 + 叠加旧24点残差（车上已覆盖格心时）</option>
         </select>
       </label>
       <label>射向处理
         <select id="recal-angle-mode">
-          <option value="auto">跟随新锚点拟合射向偏移 Δθ(r)</option>
+          <option value="auto">2D 几何 MAP 拟合射向偏移（推荐）</option>
           <option value="offset">射向仅做统一零位平移 Δθ₀</option>
           <option value="keep">保持原 24 点射向不变（仅校准 RPM）</option>
         </select>

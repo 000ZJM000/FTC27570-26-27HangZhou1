@@ -31,6 +31,14 @@ abstract class PackagePedroRoute extends DefaultTask {
 
     @InputFile
     @PathSensitive(PathSensitivity.NONE)
+    abstract RegularFileProperty getDirectParkFarRouteFile()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.NONE)
+    abstract RegularFileProperty getDirectParkNearRouteFile()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.NONE)
     abstract RegularFileProperty getShotModelFile()
 
     @OutputDirectory
@@ -43,6 +51,8 @@ abstract class PackagePedroRoute extends DefaultTask {
     void packageRoute() {
         def source = routeFile
         def waitShootParkSource = waitShootParkRouteFile
+        def directParkFarSource = directParkFarRouteFile
+        def directParkNearSource = directParkNearRouteFile
         def shotModel = shotModelFile
         def assets = assetsDirectory
         fileSystemOperations.sync {
@@ -53,6 +63,14 @@ abstract class PackagePedroRoute extends DefaultTask {
             from(waitShootParkSource) {
                 into('pedro')
                 rename { 'wait-shoot-park-route.json' }
+            }
+            from(directParkFarSource) {
+                into('pedro')
+                rename { 'direct-park-far-route.json' }
+            }
+            from(directParkNearSource) {
+                into('pedro')
+                rename { 'direct-park-near-route.json' }
             }
             from(shotModel) {
                 into('biobuzz')
@@ -66,6 +84,8 @@ abstract class PackagePedroRoute extends DefaultTask {
 def copyPedroRoute = tasks.register('copyPedroRoute', PackagePedroRoute) {
     routeFile.set(rootProject.layout.projectDirectory.file('PP/吸两组设三组2T-3.json'))
     waitShootParkRouteFile.set(rootProject.layout.projectDirectory.file('PP/等待后打预制park.json'))
+    directParkFarRouteFile.set(rootProject.layout.projectDirectory.file('PP/直接停远.json'))
+    directParkNearRouteFile.set(rootProject.layout.projectDirectory.file('PP/直接停近.json'))
     shotModelFile.set(rootProject.layout.projectDirectory.file('测点/shot_model.json'))
     assetsDirectory.set(layout.buildDirectory.dir('generated/pedroRouteAssets'))
 }

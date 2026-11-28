@@ -32,6 +32,7 @@ public final class Flywheel {
     private double lastSampleTime = Maths.time(), lastMotion = lastSampleTime;
     private double acceleration, sampleDt, coldStartedAt = Double.NaN;
     private boolean fault, stallWatchdogArmed;
+    private boolean recoveryBoostEnabled = true;
     public double speed, target, output;
 
     public Flywheel(HardwareMap map, CalibrationStore store) {
@@ -108,6 +109,8 @@ public final class Flywheel {
     public double[] voltageModel() { return model == null ? null : model.clone(); }
     public double integralVolts() { return BatteryVoltage.NOMINAL_VOLTS * pid.integralDuty(); }
 
+    public void setRecoveryBoostEnabled(boolean enabled) { recoveryBoostEnabled = enabled; }
+
     public void setVoltageModel(double[] curve) {
         if (!validModel(curve)) throw new IllegalArgumentException("Invalid flywheel voltage model");
         model = curve.clone();
@@ -162,7 +165,9 @@ public final class Flywheel {
 
     public boolean readyForShot(boolean feeding) {
         if (fault || target <= 0) return false;
-        return feeding ? speed >= 0.82 * target : speed >= 0.92 * target && speed <= 1.12 * target;
+        double pauseRatio = Maths.clip(RobotConfig.FLYWHEEL_LOCK_PAUSE_RATIO, 0.50, 0.96);
+        double resumeRatio = Maths.clip(RobotConfig.FLYWHEEL_LOCK_RESUME_RATIO, pauseRatio, 0.99);
+        return feeding ? speed >= pauseRatio * target : speed >= resumeRatio * target && speed <= 1.045 * target;
     }
 
     public boolean hasBlocker() { return blocker != null; }
@@ -180,7 +185,7 @@ public final class Flywheel {
             if (!Double.isFinite(reading)) throw new IllegalStateException("m-8 velocity is invalid");
             if (reading > 2) lastMotion = now;
             double prior = speed;
-            speed += elapsed / (0.018 + elapsed) * (reading - speed);
+            speed += elapsed / (0.012 + elapsed) * (reading - speed);
             double rawAcceleration = elapsed > 0.10 ? 0 : (speed - prior) / elapsed;
             acceleration = elapsed > 0.10 ? 0
                     : acceleration + elapsed / (0.045 + elapsed) * (rawAcceleration - acceleration);
@@ -203,7 +208,7 @@ public final class Flywheel {
             return;
         }
         boolean starting = target <= 0 && rpm() < 200;
-        double nextTarget = Maths.clip(rpm, 0, maxTargetRpm()) * ticksPerRev / 60;
+        double nextTarget = Maths.clip(rpm, 0, maxTargetRpmAtBattery()) * ticksPerRev / 60;
         if (target <= 0 || Math.abs(nextTarget - target) > ticksPerRev * TARGET_RESET_RPM / 60) {
             pid.reset();
         }
@@ -222,9 +227,30 @@ public final class Flywheel {
                 available = Math.min(available, battery.nominal(progress * RobotConfig.FLYWHEEL_MAX_POWER));
             }
         }
+        double errorRpm = ticksPerRev > 0 ? 60.0 * (target - speed) / ticksPerRev : 0.0;
+        double intLimit = Maths.clip(RobotConfig.FLYWHEEL_INTEGRAL_LIMIT, 0.0, INTEGRAL_LIMIT);
+        double iZoneRpm = Math.max(0.0, RobotConfig.FLYWHEEL_INTEGRAL_ZONE_RPM);
+        double coastRpm = Math.max(20.0, RobotConfig.FLYWHEEL_OVERSPEED_COAST_RPM);
+        if (!coldStarting && errorRpm < -coastRpm) {
+            pid.clampIntegral(-intLimit, 0.0);
+            writePower(0);
+            return;
+        }
+        double deadbandRpm = Math.max(10.0, RobotConfig.FLYWHEEL_RECOVERY_DEADBAND_RPM);
+        double fullBoostRpm = Math.max(deadbandRpm + 20.0, RobotConfig.FLYWHEEL_RECOVERY_FULL_RPM);
+        boolean recovering = recoveryBoostEnabled && !coldStarting
+                && RobotConfig.FLYWHEEL_RECOVERY_FULL_RPM > 0 && errorRpm > deadbandRpm;
+        double effectiveAccel = (recovering && acceleration > 0) ? 0.0 : acceleration;
+        boolean allowIntegral = !coldStarting && intLimit > 0 && Math.abs(errorRpm) <= iZoneRpm;
+        pid.clampIntegral(-intLimit, intLimit);
         double command = pid.update((target - speed) / model[0],
-                Maths.clip(acceleration / model[0], -1.5, 1.5),
-                feedforwardVolts() / BatteryVoltage.NOMINAL_VOLTS, dt, 0, available, !coldStarting);
+                Maths.clip(effectiveAccel / model[0], -1.5, 1.5),
+                feedforwardVolts() / BatteryVoltage.NOMINAL_VOLTS, dt, 0, available, allowIntegral);
+        pid.clampIntegral(-intLimit, intLimit);
+        if (recovering && command < available) {
+            double fraction = Maths.clip((errorRpm - deadbandRpm) / (fullBoostRpm - deadbandRpm), 0.0, 1.0);
+            command += fraction * (available - command);
+        }
         writeVolts(BatteryVoltage.NOMINAL_VOLTS * command);
     }
 
